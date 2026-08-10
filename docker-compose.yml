@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: inkwell
+      POSTGRES_USER: inkwell
+      POSTGRES_PASSWORD: inkwell
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inkwell -d inkwell"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  postgres-test:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: inkwell_test
+      POSTGRES_USER: inkwell_test
+      POSTGRES_PASSWORD: inkwell_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inkwell_test -d inkwell_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  postgres_data:
