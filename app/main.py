@@ -49,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Retry-After"],
     )
     application.include_router(health_router)
     application.include_router(v1_router, prefix=resolved_settings.api_v1_prefix)

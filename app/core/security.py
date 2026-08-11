@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 
 password_hash = PasswordHash.recommended()
+DUMMY_PASSWORD_HASH = password_hash.hash("inkwell-dummy-password-for-constant-work-verification")
 
 
 def hash_password(password: str) -> str:
@@ -21,10 +22,17 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed_password: str) -> bool:
     """Verify a plaintext password without exposing backend hash errors."""
 
+    valid, _updated_hash = verify_and_update_password(password, hashed_password)
+    return valid
+
+
+def verify_and_update_password(password: str, hashed_password: str) -> tuple[bool, str | None]:
+    """Verify a password and return a replacement hash when its parameters are outdated."""
+
     try:
-        return password_hash.verify(password, hashed_password)
+        return password_hash.verify_and_update(password, hashed_password)
     except Exception:
-        return False
+        return False, None
 
 
 def create_access_token(
@@ -66,5 +74,6 @@ def decode_access_token(token: str, settings: Settings) -> dict[str, Any]:
             status_code=401,
             code="invalid_token",
             message="The access token is invalid or expired",
+            headers={"WWW-Authenticate": "Bearer"},
         ) from exc
     return payload

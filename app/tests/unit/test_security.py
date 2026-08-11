@@ -36,6 +36,7 @@ def test_rejects_malformed_token(token: str, settings: Settings) -> None:
 
     assert error.value.status_code == 401
     assert error.value.code == "invalid_token"
+    assert error.value.headers == {"WWW-Authenticate": "Bearer"}
 
 
 def test_rejects_expired_token(settings: Settings) -> None:

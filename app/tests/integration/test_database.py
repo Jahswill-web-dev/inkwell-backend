@@ -21,9 +21,14 @@ def require_test_url(settings: Settings) -> str:
 
 
 @pytest.mark.database
-def test_migrations_upgrade_to_head(settings: Settings) -> None:
+def test_migrations_upgrade_downgrade_and_restore(settings: Settings) -> None:
     database_url = require_test_url(settings)
-    command.upgrade(alembic_config(database_url), "head")
+    config = alembic_config(database_url)
+    command.upgrade(config, "head")
+    try:
+        command.downgrade(config, "20260810_0001")
+    finally:
+        command.upgrade(config, "head")
 
 
 @pytest.mark.database

@@ -32,12 +32,25 @@ def test_v1_domain_endpoints_are_not_exposed(client: TestClient) -> None:
         assert response.json()["error"]["code"] == "http_404"
 
 
-def test_openapi_contains_health_endpoints_only(client: TestClient) -> None:
+def test_openapi_contains_health_and_authentication_endpoints(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
 
     assert "/health" in paths
     assert "/ready" in paths
-    assert all(not path.startswith("/api/v1/") for path in paths)
+    assert "/api/v1/auth/register" in paths
+    assert "/api/v1/auth/login" in paths
+    assert "/api/v1/auth/me" in paths
+    assert {path for path in paths if path.startswith("/api/v1/")} == {
+        "/api/v1/auth/login",
+        "/api/v1/auth/me",
+        "/api/v1/auth/register",
+    }
+
+    security_schemes = client.get("/openapi.json").json()["components"]["securitySchemes"]
+    assert security_schemes["HTTPBearer"]["scheme"] == "bearer"
+    assert paths["/api/v1/auth/me"]["get"]["security"] == [{"HTTPBearer": []}]
+    assert "security" not in paths["/api/v1/auth/login"]["post"]
+    assert "security" not in paths["/api/v1/auth/register"]["post"]
 
 
 def test_readiness_returns_standard_error_when_database_is_unavailable(

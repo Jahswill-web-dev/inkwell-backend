@@ -37,3 +37,16 @@ def test_rejects_placeholder_secret_in_production() -> None:
             app_env="production",
             jwt_secret_key="replace-with-at-least-32-random-characters",
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "login_rate_limit_email_failures",
+        "login_rate_limit_ip_failures",
+        "login_rate_limit_window_seconds",
+    ],
+)
+def test_rejects_non_positive_login_rate_limit_settings(field: str) -> None:
+    with pytest.raises(ValidationError):
+        valid_settings(**{field: 0})

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     jwt_issuer: str = "inkwell-api"
     jwt_audience: str = "inkwell-client"
 
+    login_rate_limit_email_failures: int = Field(default=5, gt=0)
+    login_rate_limit_ip_failures: int = Field(default=20, gt=0)
+    login_rate_limit_window_seconds: int = Field(default=900, gt=0)
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     @field_validator("api_v1_prefix")

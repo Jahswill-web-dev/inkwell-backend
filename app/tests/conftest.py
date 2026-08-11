@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import sys
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 os.environ.setdefault(
     "DATABASE_URL", "postgresql+psycopg://inkwell_test:inkwell_test@localhost:5433/inkwell_test"

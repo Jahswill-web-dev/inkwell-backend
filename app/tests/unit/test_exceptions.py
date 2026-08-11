@@ -37,3 +37,22 @@ def test_http_404_uses_standard_shape() -> None:
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "http_404"
+
+
+def test_app_error_includes_response_headers() -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/limited")
+    async def limited() -> None:
+        raise AppError(
+            status_code=429,
+            code="too_many_requests",
+            message="Try again later",
+            headers={"Retry-After": "30"},
+        )
+
+    response = TestClient(app).get("/limited")
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "30"
