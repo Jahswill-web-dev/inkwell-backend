@@ -26,7 +26,7 @@ def test_health_does_not_require_database(client: TestClient) -> None:
 
 
 def test_v1_domain_endpoints_are_not_exposed(client: TestClient) -> None:
-    for path in ("articles", "outlines", "drafts", "reviews", "jobs"):
+    for path in ("outlines", "drafts", "reviews", "jobs"):
         response = client.get(f"/api/v1/{path}")
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "http_404"
@@ -40,7 +40,11 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
     assert "/api/v1/auth/register" in paths
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/auth/me" in paths
+    assert "/api/v1/articles" in paths
+    assert "/api/v1/articles/{article_id}" in paths
     assert {path for path in paths if path.startswith("/api/v1/")} == {
+        "/api/v1/articles",
+        "/api/v1/articles/{article_id}",
         "/api/v1/auth/login",
         "/api/v1/auth/me",
         "/api/v1/auth/register",
@@ -49,6 +53,8 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
     security_schemes = client.get("/openapi.json").json()["components"]["securitySchemes"]
     assert security_schemes["HTTPBearer"]["scheme"] == "bearer"
     assert paths["/api/v1/auth/me"]["get"]["security"] == [{"HTTPBearer": []}]
+    assert paths["/api/v1/articles"]["post"]["security"] == [{"HTTPBearer": []}]
+    assert paths["/api/v1/articles"]["get"]["security"] == [{"HTTPBearer": []}]
     assert "security" not in paths["/api/v1/auth/login"]["post"]
     assert "security" not in paths["/api/v1/auth/register"]["post"]
 

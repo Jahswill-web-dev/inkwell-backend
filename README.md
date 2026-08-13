@@ -173,7 +173,8 @@ docker compose down
 ## API Reference
 
 This section is the integration contract for the endpoints currently exposed by the backend.
-Additional article-generation routes exist as scaffolds but do not expose operations yet.
+Article intake routes persist the source material needed by the future AI brief-generation flow.
+Other article-generation routes remain scaffolds and do not expose operations yet.
 
 ### Connection Details
 
@@ -210,6 +211,11 @@ allows `http://localhost:3000`.
 | `POST` | `/api/v1/auth/register` | None | `201 Created` | Create an account and receive an access token |
 | `POST` | `/api/v1/auth/login` | None | `200 OK` | Authenticate by email and receive an access token |
 | `GET` | `/api/v1/auth/me` | Bearer token | `200 OK` | Return the authenticated user |
+| `POST` | `/api/v1/articles` | Bearer token | `201 Created` | Create an article intake |
+| `GET` | `/api/v1/articles` | Bearer token | `200 OK` | List the current user's articles |
+| `GET` | `/api/v1/articles/{article_id}` | Bearer token | `200 OK` | Retrieve an owned article |
+| `PATCH` | `/api/v1/articles/{article_id}` | Bearer token | `200 OK` | Partially update an owned article |
+| `DELETE` | `/api/v1/articles/{article_id}` | Bearer token | `204 No Content` | Permanently delete an owned article |
 
 ### Standard Error Format
 
@@ -614,4 +620,97 @@ Both authentication errors include:
 WWW-Authenticate: Bearer
 ```
 
+### Article intake
 
+Article intake endpoints require a bearer access token. They save the user's notes and planning
+choices but do not generate a brief yet. Every read and mutation is scoped to the authenticated
+user.
+
+The five accepted `article_goal` values map to frontend labels as follows:
+
+| API value | Display label |
+| --- | --- |
+| `inform_and_inspire` | Inform and inspire |
+| `educate_with_practical_guidance` | Educate with practical guidance |
+| `persuade_or_change_a_perspective` | Persuade or change a perspective |
+| `inspire_readers_to_take_action` | Inspire readers to take action |
+| `entertain_with_a_compelling_story` | Entertain with a compelling story |
+
+All text fields are trimmed and must contain non-whitespace content. `notes` accepts at most
+20,000 characters, `working_title` at most 200, and `target_audience` at most 500.
+
+#### POST `/api/v1/articles`
+
+Creates an article intake. All four fields are required.
+
+```json
+{
+  "notes": "Research notes and an early idea",
+  "working_title": "How small teams can publish consistently",
+  "target_audience": "Independent writers and small content teams",
+  "article_goal": "educate_with_practical_guidance"
+}
+```
+
+Successful response - `201 Created`:
+
+```json
+{
+  "id": "be5579e3-24fd-4272-a35f-f74740c3887e",
+  "user_id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",
+  "notes": "Research notes and an early idea",
+  "working_title": "How small teams can publish consistently",
+  "target_audience": "Independent writers and small content teams",
+  "article_goal": "educate_with_practical_guidance",
+  "created_at": "2026-08-12T12:00:00Z",
+  "updated_at": "2026-08-12T12:00:00Z"
+}
+```
+
+#### GET `/api/v1/articles`
+
+Returns the current user's articles newest first. `offset` defaults to `0`; `limit` defaults to
+`20` and accepts values from 1 through 100.
+
+```http
+GET /api/v1/articles?offset=0&limit=20
+Authorization: Bearer <access_token>
+```
+
+```json
+{
+  "items": [],
+  "total": 0,
+  "offset": 0,
+  "limit": 20
+}
+```
+
+#### GET `/api/v1/articles/{article_id}`
+
+Returns one article owned by the authenticated user. A missing article or an article owned by a
+different user returns `404 Not Found` with the `article_not_found` error code.
+
+#### PATCH `/api/v1/articles/{article_id}`
+
+Updates any non-empty subset of `notes`, `working_title`, `target_audience`, and `article_goal`.
+An empty object or an explicit `null` value fails validation with `422 Unprocessable Entity`.
+
+```json
+{
+  "working_title": "A revised working title",
+  "article_goal": "inform_and_inspire"
+}
+```
+
+#### DELETE `/api/v1/articles/{article_id}`
+
+Permanently deletes an owned article and returns `204 No Content` with an empty response body.
+
+Possible article endpoint responses:
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found` | The article is missing or belongs to another user |
+| `422 Unprocessable Entity` | `validation_error` | A body, path, or pagination value failed validation |
