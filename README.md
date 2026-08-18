@@ -12,6 +12,7 @@ validation, and infrastructure concerns remain separate as the application grows
 - SQLAlchemy 2 with async psycopg
 - Alembic database migrations
 - Pydantic and pydantic-settings
+- Google Gen AI SDK with Gemini on Vertex AI
 - Argon2 password hashing with pwdlib
 - JWT authentication with PyJWT
 - uv for dependency and virtual-environment management
@@ -76,7 +77,45 @@ Copy-Item .env.example .env
 Replace `JWT_SECRET_KEY` in `.env` with a private random value containing at least 32 characters.
 Do not commit the `.env` file.
 
-### 3. Start PostgreSQL
+### 3. Configure Vertex AI
+
+Brief generation requires a Google Cloud project with billing and the Vertex AI API enabled. Install
+the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install), then run:
+
+```powershell
+gcloud init
+gcloud config set project YOUR_PROJECT_ID
+gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT_ID
+gcloud auth application-default login
+gcloud auth application-default set-quota-project YOUR_PROJECT_ID
+```
+
+The authenticated developer or runtime service account needs the Vertex AI User
+(`roles/aiplatform.user`) role. An administrator can grant it to a developer with:
+
+```powershell
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID `
+  --member="user:YOUR_EMAIL" `
+  --role="roles/aiplatform.user"
+```
+
+Configure the backend in `.env`:
+
+```env
+VERTEX_PROJECT_ID=your-google-cloud-project-id
+VERTEX_LOCATION=global
+VERTEX_MODEL_ID=gemini-2.5-flash
+VERTEX_REQUEST_TIMEOUT_SECONDS=45
+VERTEX_MAX_OUTPUT_TOKENS=4096
+```
+
+Application Default Credentials are discovered automatically and must not be copied into `.env`.
+For production on Google Cloud, attach a dedicated service account to the workload. For deployments
+outside Google Cloud, prefer Workload Identity Federation instead of a downloadable service-account
+key. If `VERTEX_PROJECT_ID` is unset, the API still starts, but brief generation returns
+`503 brief_generation_unavailable`.
+
+### 4. Start PostgreSQL
 
 ```powershell
 docker compose up -d postgres
@@ -85,13 +124,13 @@ docker compose up -d postgres
 The development database will be available on port `5432` using the connection configured in
 `.env`.
 
-### 4. Apply database migrations
+### 5. Apply database migrations
 
 ```powershell
 uv run alembic upgrade head
 ```
 
-### 5. Start the API
+### 6. Start the API
 
 ```powershell
 uv run uvicorn app.main:app --reload
@@ -142,6 +181,13 @@ docker compose --profile test stop postgres-test
 The test database runs on port `5433` and uses temporary in-memory storage. It is separate from
 the development database.
 
+To make one real Vertex AI request after configuring credentials, run the opt-in smoke test:
+
+```powershell
+$env:RUN_VERTEX_SMOKE_TEST="true"
+uv run pytest app/tests/integration/test_vertex_smoke.py
+```
+
 ## Code Quality
 
 ```powershell
@@ -173,8 +219,8 @@ docker compose down
 ## API Reference
 
 This section is the integration contract for the endpoints currently exposed by the backend.
-Article intake routes persist the source material needed by the future AI brief-generation flow.
-Other article-generation routes remain scaffolds and do not expose operations yet.
+Article intake routes persist source material and can generate structured editorial briefs and
+outlines through Gemini on Vertex AI. Drafting and review routes remain scaffolds.
 
 ### Connection Details
 
@@ -216,6 +262,13 @@ allows `http://localhost:3000`.
 | `GET` | `/api/v1/articles/{article_id}` | Bearer token | `200 OK` | Retrieve an owned article |
 | `PATCH` | `/api/v1/articles/{article_id}` | Bearer token | `200 OK` | Partially update an owned article |
 | `DELETE` | `/api/v1/articles/{article_id}` | Bearer token | `204 No Content` | Permanently delete an owned article |
+| `POST` | `/api/v1/articles/{article_id}/brief` | Bearer token | `200 OK` | Generate or replace an article brief |
+| `GET` | `/api/v1/articles/{article_id}/brief` | Bearer token | `200 OK` | Retrieve an article brief |
+| `PATCH` | `/api/v1/articles/{article_id}/brief` | Bearer token | `200 OK` | Partially update an article brief |
+| `POST` | `/api/v1/articles/{article_id}/outline` | Bearer token | `200 OK` | Generate or replace an article outline |
+| `GET` | `/api/v1/articles/{article_id}/outline` | Bearer token | `200 OK` | Retrieve an article outline |
+| `PATCH` | `/api/v1/articles/{article_id}/outline` | Bearer token | `200 OK` | Replace an outline's sections |
+| `DELETE` | `/api/v1/articles/{article_id}/outline` | Bearer token | `204 No Content` | Delete an article outline |
 
 ### Standard Error Format
 
@@ -623,8 +676,7 @@ WWW-Authenticate: Bearer
 ### Article intake
 
 Article intake endpoints require a bearer access token. They save the user's notes and planning
-choices but do not generate a brief yet. Every read and mutation is scoped to the authenticated
-user.
+choices used for brief generation. Every read and mutation is scoped to the authenticated user.
 
 The five accepted `article_goal` values map to frontend labels as follows:
 
@@ -637,7 +689,10 @@ The five accepted `article_goal` values map to frontend labels as follows:
 | `entertain_with_a_compelling_story` | Entertain with a compelling story |
 
 All text fields are trimmed and must contain non-whitespace content. `notes` accepts at most
-20,000 characters, `working_title` at most 200, and `target_audience` at most 500.
+20,000 characters and `working_title` at most 200. `target_audience` must be a JSON array containing
+1 through 10 strings. Each audience accepts at most 500 characters. Audiences must be unique when
+compared case-insensitively; their original spelling, casing, and order are otherwise preserved.
+Sending a single string instead of an array fails validation.
 
 #### POST `/api/v1/articles`
 
@@ -647,7 +702,10 @@ Creates an article intake. All four fields are required.
 {
   "notes": "Research notes and an early idea",
   "working_title": "How small teams can publish consistently",
-  "target_audience": "Independent writers and small content teams",
+  "target_audience": [
+    "Independent writers",
+    "Small content teams"
+  ],
   "article_goal": "educate_with_practical_guidance"
 }
 ```
@@ -660,11 +718,43 @@ Successful response - `201 Created`:
   "user_id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",
   "notes": "Research notes and an early idea",
   "working_title": "How small teams can publish consistently",
-  "target_audience": "Independent writers and small content teams",
+  "target_audience": [
+    "Independent writers",
+    "Small content teams"
+  ],
   "article_goal": "educate_with_practical_guidance",
   "created_at": "2026-08-12T12:00:00Z",
   "updated_at": "2026-08-12T12:00:00Z"
 }
+```
+
+Frontend example:
+
+```javascript
+const targetAudience = ["Independent writers", "Small content teams"];
+
+const response = await fetch("http://127.0.0.1:8000/api/v1/articles", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    notes: "Research notes and an early idea",
+    working_title: "How small teams can publish consistently",
+    target_audience: targetAudience,
+    article_goal: "educate_with_practical_guidance",
+  }),
+});
+
+const article = await response.json();
+
+if (!response.ok) {
+  throw new Error(article.error?.message ?? "Unable to create article");
+}
+
+// target_audience is always string[] in article responses.
+console.log(article.target_audience);
 ```
 
 #### GET `/api/v1/articles`
@@ -695,10 +785,12 @@ different user returns `404 Not Found` with the `article_not_found` error code.
 
 Updates any non-empty subset of `notes`, `working_title`, `target_audience`, and `article_goal`.
 An empty object or an explicit `null` value fails validation with `422 Unprocessable Entity`.
+When supplied, `target_audience` replaces the complete existing array.
 
 ```json
 {
   "working_title": "A revised working title",
+  "target_audience": ["Editors", "Publishers"],
   "article_goal": "inform_and_inspire"
 }
 ```
@@ -714,3 +806,184 @@ Possible article endpoint responses:
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
 | `404 Not Found` | `article_not_found` | The article is missing or belongs to another user |
 | `422 Unprocessable Entity` | `validation_error` | A body, path, or pagination value failed validation |
+
+### Article briefs
+
+Article brief endpoints synchronously call Gemini on Vertex AI and may take several seconds. The
+backend sends the saved article's working title, notes, target audiences, and goal to Gemini and
+validates the generated JSON before saving it. It does not send user credentials or authentication
+tokens to Gemini.
+
+#### POST `/api/v1/articles/{article_id}/brief`
+
+Generates the first brief or replaces the current brief. Send no request body. Regeneration keeps
+the brief ID but replaces its generated content and metadata.
+
+```http
+POST /api/v1/articles/be5579e3-24fd-4272-a35f-f74740c3887e/brief
+Authorization: Bearer <access_token>
+```
+
+Successful response - `200 OK`:
+
+```json
+{
+  "id": "ccbfce42-98bf-4f44-b4cf-206cc3661f11",
+  "article_id": "be5579e3-24fd-4272-a35f-f74740c3887e",
+  "summary": "A practical guide to building a repeatable publishing process for small teams.",
+  "core_angle": "Consistency comes from a clear workflow rather than individual discipline.",
+  "audience_insights": [
+    "Independent writers need a lightweight process they can maintain alone",
+    "Small teams need explicit ownership and review stages"
+  ],
+  "tone_and_style": "Practical, encouraging, and specific",
+  "key_takeaways": [
+    "Define a small repeatable workflow",
+    "Assign ownership for every stage",
+    "Review the process using a consistent cadence"
+  ],
+  "evidence_gaps": ["Examples showing the workflow in use"],
+  "call_to_action": "Create a one-page checklist for the next article.",
+  "seo": {
+    "suggested_titles": [
+      "A Repeatable Publishing Process for Small Teams",
+      "How Small Teams Can Publish Consistently",
+      "Build a Content Workflow Your Team Can Sustain"
+    ],
+    "primary_keyword": "publishing process",
+    "secondary_keywords": ["content workflow", "consistent publishing"],
+    "meta_description": "Build a practical publishing process that helps writers and small teams create content consistently."
+  },
+  "model_id": "gemini-2.5-flash",
+  "prompt_version": "article_brief_v1",
+  "input_token_count": 275,
+  "output_token_count": 640,
+  "generation_duration_ms": 3240,
+  "is_stale": false,
+  "created_at": "2026-08-14T12:00:00Z",
+  "updated_at": "2026-08-14T12:00:00Z"
+}
+```
+
+Frontend example:
+
+```javascript
+async function generateBrief(articleId, accessToken) {
+  const response = await fetch(
+    `http://127.0.0.1:8000/api/v1/articles/${articleId}/brief`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  const body = await response.json();
+
+  if (!response.ok) {
+    throw new Error(body.error?.message ?? "Unable to generate brief");
+  }
+
+  return body;
+}
+```
+
+#### GET `/api/v1/articles/{article_id}/brief`
+
+Returns the saved brief without calling Gemini. If the article inputs have changed since generation,
+the brief remains available with `is_stale: true`. The frontend should offer regeneration when this
+flag is true.
+
+#### PATCH `/api/v1/articles/{article_id}/brief`
+
+Partially updates saved brief content without calling Gemini. Send at least one content field; empty
+bodies and explicit `null` values are rejected. Generation metadata is read-only. SEO supports
+nested partial updates, so a client can update only `meta_description`, for example:
+
+```json
+{
+  "core_angle": "Consistency comes from reducing handoffs and making ownership visible.",
+  "seo": {
+    "meta_description": "Build a visible publishing workflow with clear ownership."
+  }
+}
+```
+
+Changes to non-SEO brief content mark an existing outline stale. SEO-only changes do not.
+
+Possible brief endpoint responses:
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found` or `brief_not_found` | The owned article or its brief does not exist |
+| `422 Unprocessable Entity` | `brief_generation_blocked` | Vertex AI rejected the supplied content |
+| `502 Bad Gateway` | `brief_generation_failed` | Vertex returned missing or invalid structured output |
+| `503 Service Unavailable` | `brief_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `504 Gateway Timeout` | `brief_generation_timeout` | Generation exceeded the configured timeout |
+
+### Article outlines
+
+An outline is generated from the current saved, non-SEO brief content. A brief must exist first.
+Outline generation does not accept a request body and does not read directly from frontend-provided
+brief fields.
+
+#### POST `/api/v1/articles/{article_id}/outline`
+
+Generates the first outline or replaces the current outline while keeping its ID. Generation is
+synchronous and returns `200 OK`:
+
+```json
+{
+  "id": "a8d789b6-6e71-436e-a981-51d25e66f538",
+  "article_id": "be5579e3-24fd-4272-a35f-f74740c3887e",
+  "sections": [
+    {
+      "heading": "Why publishing consistency breaks down",
+      "purpose": "Establish the operational causes of inconsistent publishing",
+      "key_points": ["Unclear ownership", "Irregular review cycles"]
+    },
+    {
+      "heading": "Design a workflow the team can sustain",
+      "purpose": "Show how to choose a minimal set of publishing stages",
+      "key_points": ["Limit work in progress", "Define completion criteria"]
+    },
+    {
+      "heading": "Turn the workflow into a habit",
+      "purpose": "Give readers a practical implementation path",
+      "key_points": ["Choose a cadence", "Review and improve the process"]
+    }
+  ],
+  "model_id": "gemini-2.5-flash",
+  "prompt_version": "article_outline_v1",
+  "input_token_count": 310,
+  "output_token_count": 420,
+  "generation_duration_ms": 2410,
+  "is_stale": false,
+  "created_at": "2026-08-18T12:00:00Z",
+  "updated_at": "2026-08-18T12:00:00Z"
+}
+```
+
+#### GET `/api/v1/articles/{article_id}/outline`
+
+Returns the saved outline without calling Gemini. `is_stale` becomes `true` after a relevant brief
+edit or full brief regeneration. The outline remains available and editable.
+
+#### PATCH `/api/v1/articles/{article_id}/outline`
+
+Replaces the complete `sections` array. Supply 3-10 sections; each section requires a non-empty
+`heading`, `purpose`, and 1-5 `key_points`. Editing a stale outline preserves its stale state.
+
+#### DELETE `/api/v1/articles/{article_id}/outline`
+
+Permanently deletes the outline and returns `204 No Content`.
+
+Possible outline endpoint responses:
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found`, `brief_not_found`, or `outline_not_found` | A required owned resource does not exist |
+| `422 Unprocessable Entity` | `validation_error` or `outline_generation_blocked` | Input validation failed or Vertex rejected the brief |
+| `502 Bad Gateway` | `outline_generation_failed` | Vertex returned missing or invalid structured output |
+| `503 Service Unavailable` | `outline_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `504 Gateway Timeout` | `outline_generation_timeout` | Generation exceeded the configured timeout |

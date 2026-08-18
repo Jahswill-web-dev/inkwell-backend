@@ -1,0 +1,17 @@
+[33mcommit 0e85bd3dfe9f42137577760d532b85ee5526774d[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Jahswill <onuegbujahswill@gmail.com>
+Date:   Thu Aug 13 05:04:33 2026 +0200
+
+    created basic CRUD for articles API
+
+[33mcommit bd407396cb5ed229e10217e067a3e18d5923e05f[m
+Author: Jahswill <onuegbujahswill@gmail.com>
+Date:   Tue Aug 11 14:52:00 2026 +0200
+
+    implemented login and signup with email username and password and add rate limiting to prevent brute force attacks
+
+[33mcommit 79591283f2bce81a8e7b334144e906ea3b4cf572[m
+Author: Jahswill <onuegbujahswill@gmail.com>
+Date:   Mon Aug 10 16:02:07 2026 +0200
+
+    initial project setup, basic fast api setup and project scalfolding

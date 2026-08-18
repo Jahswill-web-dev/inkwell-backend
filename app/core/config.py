@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     login_rate_limit_ip_failures: int = Field(default=20, gt=0)
     login_rate_limit_window_seconds: int = Field(default=900, gt=0)
 
+    vertex_project_id: str | None = None
+    vertex_location: str = "global"
+    vertex_model_id: str = "gemini-2.5-flash"
+    vertex_request_timeout_seconds: float = Field(default=45, gt=0)
+    vertex_max_output_tokens: int = Field(default=4096, gt=0)
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     @field_validator("api_v1_prefix")

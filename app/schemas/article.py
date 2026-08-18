@@ -1,9 +1,29 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+TargetAudienceItem = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
+TargetAudienceList = Annotated[list[TargetAudienceItem], Field(min_length=1, max_length=10)]
+
+
+def _require_unique_audiences(value: list[str]) -> list[str]:
+    normalized = [audience.casefold() for audience in value]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("Target audiences must be unique")
+    return value
 
 
 class ArticleGoal(StrEnum):
@@ -17,13 +37,18 @@ class ArticleGoal(StrEnum):
 class ArticleFields(BaseModel):
     notes: str = Field(min_length=1, max_length=20_000)
     working_title: str = Field(min_length=1, max_length=200)
-    target_audience: str = Field(min_length=1, max_length=500)
+    target_audience: TargetAudienceList
     article_goal: ArticleGoal
 
-    @field_validator("notes", "working_title", "target_audience", mode="before")
+    @field_validator("notes", "working_title", mode="before")
     @classmethod
     def strip_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("target_audience")
+    @classmethod
+    def require_unique_audiences(cls, value: list[str]) -> list[str]:
+        return _require_unique_audiences(value)
 
 
 class ArticleCreate(ArticleFields):
@@ -33,13 +58,18 @@ class ArticleCreate(ArticleFields):
 class ArticleUpdate(BaseModel):
     notes: str | None = Field(default=None, min_length=1, max_length=20_000)
     working_title: str | None = Field(default=None, min_length=1, max_length=200)
-    target_audience: str | None = Field(default=None, min_length=1, max_length=500)
+    target_audience: TargetAudienceList | None = None
     article_goal: ArticleGoal | None = None
 
-    @field_validator("notes", "working_title", "target_audience", mode="before")
+    @field_validator("notes", "working_title", mode="before")
     @classmethod
     def strip_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("target_audience")
+    @classmethod
+    def require_unique_audiences(cls, value: list[str] | None) -> list[str] | None:
+        return _require_unique_audiences(value) if value is not None else None
 
     @model_validator(mode="after")
     def require_non_null_field(self) -> Self:

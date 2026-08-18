@@ -6,12 +6,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from google.auth.exceptions import GoogleAuthError
 
 from app.api.health import router as health_router
 from app.api.v1.router import router as v1_router
 from app.core.config import Settings, get_settings
 from app.core.exceptions import register_exception_handlers
 from app.db.session import create_engine, create_session_factory
+from app.services.ai_service import (
+    BriefGenerator,
+    OutlineGenerator,
+    VertexGeminiBriefGenerator,
+    VertexGeminiOutlineGenerator,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def configure_logging(level: str) -> None:
@@ -21,18 +30,43 @@ def configure_logging(level: str) -> None:
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    brief_generator: BriefGenerator | None = None,
+    outline_generator: OutlineGenerator | None = None,
+) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         engine = create_engine(resolved_settings)
+        managed_generator: VertexGeminiBriefGenerator | None = None
+        managed_outline_generator: VertexGeminiOutlineGenerator | None = None
+        resolved_generator = brief_generator
+        resolved_outline_generator = outline_generator
+        if resolved_settings.vertex_project_id is not None:
+            try:
+                if resolved_generator is None:
+                    managed_generator = VertexGeminiBriefGenerator(resolved_settings)
+                    resolved_generator = managed_generator
+                if resolved_outline_generator is None:
+                    managed_outline_generator = VertexGeminiOutlineGenerator(resolved_settings)
+                    resolved_outline_generator = managed_outline_generator
+            except GoogleAuthError:
+                logger.exception("Vertex AI credentials could not be initialized")
         application.state.engine = engine
         application.state.session_factory = create_session_factory(engine)
+        application.state.brief_generator = resolved_generator
+        application.state.outline_generator = resolved_outline_generator
         try:
             yield
         finally:
+            if managed_generator is not None:
+                await managed_generator.close()
+            if managed_outline_generator is not None:
+                await managed_outline_generator.close()
             await engine.dispose()
 
     application = FastAPI(
