@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from time import perf_counter
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +13,7 @@ from app.db.repositories.article import ArticleRepository
 from app.db.repositories.article_brief import ArticleBriefRepository
 from app.db.repositories.article_outline import ArticleOutlineRepository
 from app.prompts.outline import PROMPT_VERSION
-from app.schemas.outline import ArticleOutlineResponse, ArticleOutlineUpdate, GeneratedOutline
+from app.schemas.outline import ArticleOutlineResponse, ArticleOutlineUpdate
 from app.services.ai_service import (
     BriefProviderBlockedError,
     BriefProviderResponseError,
@@ -102,7 +102,22 @@ class ArticleOutlineService:
     ) -> ArticleOutlineResponse:
         brief = await self._get_owned_brief(article_id=article_id, user_id=user_id)
         outline = await self._get_outline(article_id)
-        sections = [section.model_dump(mode="json") for section in payload.sections]
+        existing_ids = {UUID(section["id"]) for section in outline.sections}
+        supplied_ids = {section.id for section in payload.sections if section.id is not None}
+        if not supplied_ids.issubset(existing_ids):
+            raise AppError(
+                status_code=422,
+                code="validation_error",
+                message="Request validation failed",
+                details=[{"field": "sections.id", "message": "Unknown outline section ID"}],
+            )
+        sections = [
+            {
+                "id": str(section.id or uuid4()),
+                **section.model_dump(mode="json", exclude={"id"}),
+            }
+            for section in payload.sections
+        ]
         if outline.sections != sections:
             outline = await self.outlines.update_sections(outline, sections)
         return outline_response(outline, brief)
@@ -160,11 +175,10 @@ class ArticleOutlineService:
 
 
 def outline_response(outline: ArticleOutline, brief: ArticleBrief) -> ArticleOutlineResponse:
-    content = GeneratedOutline.model_validate(outline, from_attributes=True)
     return ArticleOutlineResponse(
-        **content.model_dump(),
         id=outline.id,
         article_id=outline.article_id,
+        sections=outline.sections,
         model_id=outline.model_id,
         prompt_version=outline.prompt_version,
         input_token_count=outline.input_token_count,

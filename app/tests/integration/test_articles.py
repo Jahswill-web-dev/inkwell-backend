@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterator
 from typing import cast
 from uuid import UUID, uuid4
@@ -15,6 +16,7 @@ from alembic import command
 from app.core.config import Settings
 from app.db.models.article import ARTICLE_GOALS, Article
 from app.db.models.article_brief import ArticleBrief
+from app.db.models.article_draft import ArticleDraft
 from app.db.models.article_outline import ArticleOutline
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.user import User
@@ -113,6 +115,7 @@ async def clear_database(settings: Settings) -> None:
     factory = create_session_factory(engine)
     try:
         async with factory.begin() as session:
+            await session.execute(delete(ArticleDraft))
             await session.execute(delete(ArticleOutline))
             await session.execute(delete(ArticleBrief))
             await session.execute(delete(Article))
@@ -686,8 +689,10 @@ def test_outline_full_lifecycle_uses_latest_brief(
     assert first.json()["prompt_version"] == "article_outline_v1"
     assert first.json()["is_stale"] is False
 
+    original_sections = first.json()["sections"]
     changed_sections = [
         {
+            "id": original_sections[index]["id"],
             "heading": f"Edited section {index}",
             "purpose": "A user-edited purpose",
             "key_points": ["An edited point"],
@@ -699,6 +704,14 @@ def test_outline_full_lifecycle_uses_latest_brief(
     )
     assert edited.status_code == 200
     assert edited.json()["sections"] == changed_sections
+
+    unknown_sections = [dict(section) for section in changed_sections]
+    unknown_sections[0]["id"] = str(uuid4())
+    unknown = client.patch(
+        outline_path, json={"sections": unknown_sections}, headers=headers(token)
+    )
+    assert unknown.status_code == 422
+    assert unknown.json()["error"]["code"] == "validation_error"
 
     assert client.patch(
         brief_path,
@@ -713,6 +726,9 @@ def test_outline_full_lifecycle_uses_latest_brief(
     regenerated = client.post(outline_path, headers=headers(token))
     assert regenerated.status_code == 200
     assert regenerated.json()["id"] == first.json()["id"]
+    assert {section["id"] for section in regenerated.json()["sections"]}.isdisjoint(
+        {section["id"] for section in first.json()["sections"]}
+    )
     assert regenerated.json()["is_stale"] is False
     assert "The latest saved angle" in regenerated.json()["sections"][0]["heading"]
     assert asyncio.run(article_outline_count(settings)) == 1
@@ -865,3 +881,159 @@ def test_article_outline_maps_provider_failures(
 
     assert response.status_code == status_code
     assert response.json()["error"]["code"] == code
+
+
+def test_draft_lifecycle_and_outline_reconciliation(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, "draft_lifecycle")
+    article = create_article(client, token)
+    outline_path = f"/api/v1/articles/{article['id']}/outline"
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    brief = client.post(
+        f"/api/v1/articles/{article['id']}/brief", headers=headers(token)
+    )
+    assert brief.status_code == 200
+
+    missing = client.get(draft_path, headers=headers(token))
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "draft_not_found"
+    no_outline = client.post(draft_path, headers=headers(token))
+    assert no_outline.status_code == 404
+    assert no_outline.json()["error"]["code"] == "outline_not_found"
+
+    outline = client.post(outline_path, headers=headers(token)).json()
+    created = client.post(draft_path, headers=headers(token))
+    repeated = client.post(draft_path, headers=headers(token))
+    assert created.status_code == 200
+    assert repeated.json() == created.json()
+    draft = created.json()
+    assert [section["outline_section_id"] for section in draft["sections"]] == [
+        section["id"] for section in outline["sections"]
+    ]
+    assert all(section["checklist"] == [] for section in draft["sections"])
+    assert all(
+        json.loads(section["editor_state"])["root"]["type"] == "root"
+        for section in draft["sections"]
+    )
+
+    saved_sections = draft["sections"]
+    saved_sections[0]["checklist"] = [
+        {"id": "opening", "label": "Set the context", "completed": True}
+    ]
+    saved_sections[0]["editor_state"] = (
+        '{"root":{"children":[],"type":"root","version":1}}'
+    )
+    standalone_id = str(uuid4())
+    saved_sections.append(
+        {
+            "id": standalone_id,
+            "outline_section_id": None,
+            "title": "Standalone",
+            "goal": "A directly added section",
+            "checklist": [],
+            "editor_state": '{"root":{"children":[],"type":"root","version":1}}',
+        }
+    )
+    saved = client.patch(draft_path, json={"sections": saved_sections}, headers=headers(token))
+    assert saved.status_code == 200
+    assert saved.json()["sections"] == saved_sections
+
+    new_outline = [
+        {
+            "id": outline["sections"][0]["id"],
+            "heading": "Refreshed title",
+            "purpose": "Refreshed goal",
+            "key_points": ["Point"],
+        },
+        outline["sections"][2],
+        {"heading": "New outline section", "purpose": "New goal", "key_points": ["Point"]},
+    ]
+    updated_outline = client.patch(
+        outline_path, json={"sections": new_outline}, headers=headers(token)
+    ).json()
+    reconciled = client.get(draft_path, headers=headers(token)).json()["sections"]
+    assert [section["id"] for section in reconciled[:4]] == [
+        section["id"] for section in saved_sections
+    ]
+    assert reconciled[0]["title"] == "Refreshed title"
+    assert reconciled[0]["goal"] == "Refreshed goal"
+    assert reconciled[0]["checklist"][0]["completed"] is True
+    assert reconciled[0]["editor_state"] == saved_sections[0]["editor_state"]
+    assert reconciled[1]["outline_section_id"] is None
+    assert reconciled[3]["outline_section_id"] is None
+    assert reconciled[4]["outline_section_id"] == updated_outline["sections"][2]["id"]
+
+    assert client.delete(outline_path, headers=headers(token)).status_code == 204
+    without_outline = client.get(draft_path, headers=headers(token)).json()
+    assert all(section["outline_section_id"] is None for section in without_outline["sections"])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"sections": [{"id": str(uuid4())}]},
+        {
+            "sections": [
+                {
+                    "id": str(uuid4()),
+                    "outline_section_id": None,
+                    "title": "Title",
+                    "goal": "Goal",
+                    "checklist": [],
+                    "editor_state": "not-json",
+                }
+            ]
+        },
+    ],
+)
+def test_patch_draft_rejects_invalid_sections(
+    article_context: tuple[TestClient, Settings], payload: dict[str, object]
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, f"invalid_draft_{len(str(payload))}")
+    article = create_article(client, token)
+    path = f"/api/v1/articles/{article['id']}/draft"
+    response = client.patch(path, json=payload, headers=headers(token))
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+@pytest.mark.parametrize("method", ["get", "post", "patch"])
+def test_article_draft_endpoints_require_authentication(
+    article_context: tuple[TestClient, Settings], method: str
+) -> None:
+    client, _settings = article_context
+    kwargs: dict[str, object] = {}
+    if method == "patch":
+        kwargs["json"] = {"sections": []}
+    response = getattr(client, method)(f"/api/v1/articles/{uuid4()}/draft", **kwargs)
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "authentication_required"
+
+
+def test_article_draft_is_owner_scoped(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, _settings = article_context
+    owner_token, _owner = register(client, "draft_owner")
+    other_token, _other = register(client, "draft_other")
+    article = create_article(client, owner_token)
+    article_id = article["id"]
+    assert client.post(
+        f"/api/v1/articles/{article_id}/brief", headers=headers(owner_token)
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/articles/{article_id}/outline", headers=headers(owner_token)
+    ).status_code == 200
+    path = f"/api/v1/articles/{article_id}/draft"
+    assert client.post(path, headers=headers(owner_token)).status_code == 200
+
+    for method in ("get", "post", "patch"):
+        kwargs: dict[str, object] = {"headers": headers(other_token)}
+        if method == "patch":
+            kwargs["json"] = {"sections": []}
+        response = getattr(client, method)(path, **kwargs)
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "article_not_found"

@@ -220,7 +220,8 @@ docker compose down
 
 This section is the integration contract for the endpoints currently exposed by the backend.
 Article intake routes persist source material and can generate structured editorial briefs and
-outlines through Gemini on Vertex AI. Drafting and review routes remain scaffolds.
+outlines through Gemini on Vertex AI and persists editable article drafts. Review routes remain
+scaffolds.
 
 ### Connection Details
 
@@ -269,6 +270,9 @@ allows `http://localhost:3000`.
 | `GET` | `/api/v1/articles/{article_id}/outline` | Bearer token | `200 OK` | Retrieve an article outline |
 | `PATCH` | `/api/v1/articles/{article_id}/outline` | Bearer token | `200 OK` | Replace an outline's sections |
 | `DELETE` | `/api/v1/articles/{article_id}/outline` | Bearer token | `204 No Content` | Delete an article outline |
+| `GET` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Retrieve and reconcile an article draft |
+| `POST` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Idempotently create an article draft |
+| `PATCH` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Replace a draft's ordered sections |
 
 ### Standard Error Format
 
@@ -937,16 +941,19 @@ synchronous and returns `200 OK`:
   "article_id": "be5579e3-24fd-4272-a35f-f74740c3887e",
   "sections": [
     {
+      "id": "10000000-0000-4000-8000-000000000000",
       "heading": "Why publishing consistency breaks down",
       "purpose": "Establish the operational causes of inconsistent publishing",
       "key_points": ["Unclear ownership", "Irregular review cycles"]
     },
     {
+      "id": "10000000-0000-4000-8000-000000000001",
       "heading": "Design a workflow the team can sustain",
       "purpose": "Show how to choose a minimal set of publishing stages",
       "key_points": ["Limit work in progress", "Define completion criteria"]
     },
     {
+      "id": "10000000-0000-4000-8000-000000000002",
       "heading": "Turn the workflow into a habit",
       "purpose": "Give readers a practical implementation path",
       "key_points": ["Choose a cadence", "Review and improve the process"]
@@ -971,7 +978,10 @@ edit or full brief regeneration. The outline remains available and editable.
 #### PATCH `/api/v1/articles/{article_id}/outline`
 
 Replaces the complete `sections` array. Supply 3-10 sections; each section requires a non-empty
-`heading`, `purpose`, and 1-5 `key_points`. Editing a stale outline preserves its stale state.
+`heading`, `purpose`, and 1-5 `key_points`. Include `id` to preserve an existing section; omit it
+for a new section. Omitted existing sections are deleted, unknown or duplicate IDs are rejected,
+and request order is preserved. Editing a stale outline preserves its stale state. Regeneration
+creates new section IDs because it is a full semantic replacement.
 
 #### DELETE `/api/v1/articles/{article_id}/outline`
 
@@ -987,3 +997,58 @@ Possible outline endpoint responses:
 | `502 Bad Gateway` | `outline_generation_failed` | Vertex returned missing or invalid structured output |
 | `503 Service Unavailable` | `outline_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
 | `504 Gateway Timeout` | `outline_generation_timeout` | Generation exceeded the configured timeout |
+
+### Article drafts
+
+An article has at most one draft. Draft creation requires a current outline, accepts no request
+body, and is idempotent. Each initial draft section copies the outline heading to `title`, purpose
+to `goal`, and ID to `outline_section_id`; checklist items start empty and editor content starts as
+valid empty Lexical JSON.
+
+#### GET `/api/v1/articles/{article_id}/draft`
+
+Returns the saved draft and reconciles it with the current outline. Linked titles and goals are
+refreshed by `outline_section_id` while editor content, checklist progress, section IDs, and draft
+ordering are preserved. Removed outline links become `null`; new outline sections append in outline
+order. If the outline itself was deleted, the draft remains available with all links set to `null`.
+
+#### POST `/api/v1/articles/{article_id}/draft`
+
+Creates and returns a draft from the current outline, or returns the existing draft unchanged.
+Returns `outline_not_found` if an initial draft cannot be created because no outline exists.
+
+#### PATCH `/api/v1/articles/{article_id}/draft`
+
+Replaces the complete ordered section collection. Section and linked outline IDs must be unique,
+checklist IDs must be unique within their section, and `editor_state` must contain a valid Lexical
+root object. A nullable `outline_section_id` represents a section created directly in the editor.
+
+```json
+{
+  "id": "30000000-0000-4000-8000-000000000000",
+  "article_id": "be5579e3-24fd-4272-a35f-f74740c3887e",
+  "sections": [
+    {
+      "id": "20000000-0000-4000-8000-000000000000",
+      "outline_section_id": "10000000-0000-4000-8000-000000000000",
+      "title": "Why publishing consistency breaks down",
+      "goal": "Establish the operational causes of inconsistent publishing",
+      "checklist": [],
+      "editor_state": "{\"root\":{\"children\":[],\"direction\":\"ltr\",\"format\":\"\",\"indent\":0,\"type\":\"root\",\"version\":1}}"
+    }
+  ],
+  "created_at": "2026-08-21T12:00:00Z",
+  "updated_at": "2026-08-21T12:05:00Z"
+}
+```
+
+Possible draft endpoint responses:
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found`, `outline_not_found`, or `draft_not_found` | A required owned resource does not exist |
+| `422 Unprocessable Entity` | `validation_error` | Draft input validation failed |
+| `502 Bad Gateway` | Service-specific | A future upstream drafting service returned an invalid response |
+| `503 Service Unavailable` | Service-specific | A required service is temporarily unavailable |
+| `504 Gateway Timeout` | Service-specific | A required service timed out |

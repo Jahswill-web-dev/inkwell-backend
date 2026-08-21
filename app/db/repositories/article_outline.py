@@ -34,7 +34,10 @@ class ArticleOutlineRepository:
         generation_duration_ms: int,
     ) -> ArticleOutline:
         values: dict[str, Any] = {
-            "sections": [section.model_dump(mode="json") for section in content.sections],
+            "sections": [
+                {"id": str(uuid4()), **section.model_dump(mode="json")}
+                for section in content.sections
+            ],
             "source_brief_revision": source_brief_revision,
             "model_id": model_id,
             "prompt_version": prompt_version,
