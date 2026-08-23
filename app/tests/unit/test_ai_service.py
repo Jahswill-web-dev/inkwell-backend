@@ -5,6 +5,7 @@ from google.genai import errors, types
 
 from app.schemas.brief import GeneratedBrief
 from app.schemas.outline import GeneratedOutline
+from app.schemas.talking_points import GeneratedTalkingPoints
 from app.services.ai_service import (
     BriefProviderBlockedError,
     BriefProviderResponseError,
@@ -12,6 +13,7 @@ from app.services.ai_service import (
     BriefSource,
     VertexGeminiBriefGenerator,
     VertexGeminiOutlineGenerator,
+    VertexGeminiTalkingPointsGenerator,
 )
 
 
@@ -63,6 +65,10 @@ def generator_without_client() -> VertexGeminiBriefGenerator:
 
 def outline_generator_without_client() -> VertexGeminiOutlineGenerator:
     return object.__new__(VertexGeminiOutlineGenerator)
+
+
+def talking_points_generator_without_client() -> VertexGeminiTalkingPointsGenerator:
+    return object.__new__(VertexGeminiTalkingPointsGenerator)
 
 
 def brief_source() -> BriefSource:
@@ -126,6 +132,35 @@ def test_parse_outline_response_returns_validated_content_and_usage() -> None:
     assert result.model_id == "test-model"
     assert result.input_token_count == 50
     assert result.output_token_count == 75
+
+
+def test_parse_talking_points_response_validates_content_and_usage() -> None:
+    generator = talking_points_generator_without_client()
+    generator.model_id = "test-model"
+    response = types.GenerateContentResponse.model_construct(
+        candidates=[types.Candidate(finish_reason=types.FinishReason.STOP)],
+        parsed={"points": ["First", "Second", "Third"]},
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=30, candidates_token_count=20
+        ),
+    )
+
+    result = generator._parse_response(response)
+
+    assert isinstance(result.talking_points, GeneratedTalkingPoints)
+    assert result.talking_points.points == ["First", "Second", "Third"]
+    assert result.input_token_count == 30
+    assert result.output_token_count == 20
+
+
+def test_parse_talking_points_response_rejects_duplicates() -> None:
+    response = types.GenerateContentResponse.model_construct(
+        candidates=[types.Candidate(finish_reason=types.FinishReason.STOP)],
+        parsed={"points": ["First", "first", "Third"]},
+    )
+
+    with pytest.raises(BriefProviderResponseError):
+        talking_points_generator_without_client()._parse_response(response)
 
 
 def test_parse_response_rejects_blocked_candidate() -> None:

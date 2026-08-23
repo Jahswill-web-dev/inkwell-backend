@@ -16,8 +16,10 @@ from app.db.session import create_engine, create_session_factory
 from app.services.ai_service import (
     BriefGenerator,
     OutlineGenerator,
+    TalkingPointsGenerator,
     VertexGeminiBriefGenerator,
     VertexGeminiOutlineGenerator,
+    VertexGeminiTalkingPointsGenerator,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ def create_app(
     *,
     brief_generator: BriefGenerator | None = None,
     outline_generator: OutlineGenerator | None = None,
+    talking_points_generator: TalkingPointsGenerator | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -44,8 +47,10 @@ def create_app(
         engine = create_engine(resolved_settings)
         managed_generator: VertexGeminiBriefGenerator | None = None
         managed_outline_generator: VertexGeminiOutlineGenerator | None = None
+        managed_talking_points_generator: VertexGeminiTalkingPointsGenerator | None = None
         resolved_generator = brief_generator
         resolved_outline_generator = outline_generator
+        resolved_talking_points_generator = talking_points_generator
         if resolved_settings.vertex_project_id is not None:
             try:
                 if resolved_generator is None:
@@ -54,12 +59,18 @@ def create_app(
                 if resolved_outline_generator is None:
                     managed_outline_generator = VertexGeminiOutlineGenerator(resolved_settings)
                     resolved_outline_generator = managed_outline_generator
+                if resolved_talking_points_generator is None:
+                    managed_talking_points_generator = VertexGeminiTalkingPointsGenerator(
+                        resolved_settings
+                    )
+                    resolved_talking_points_generator = managed_talking_points_generator
             except GoogleAuthError:
                 logger.exception("Vertex AI credentials could not be initialized")
         application.state.engine = engine
         application.state.session_factory = create_session_factory(engine)
         application.state.brief_generator = resolved_generator
         application.state.outline_generator = resolved_outline_generator
+        application.state.talking_points_generator = resolved_talking_points_generator
         try:
             yield
         finally:
@@ -67,6 +78,8 @@ def create_app(
                 await managed_generator.close()
             if managed_outline_generator is not None:
                 await managed_outline_generator.close()
+            if managed_talking_points_generator is not None:
+                await managed_talking_points_generator.close()
             await engine.dispose()
 
     application = FastAPI(

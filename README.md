@@ -273,6 +273,7 @@ allows `http://localhost:3000`.
 | `GET` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Retrieve and reconcile an article draft |
 | `POST` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Idempotently create an article draft |
 | `PATCH` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Replace a draft's ordered sections |
+| `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points` | Bearer token | `200 OK` | Generate transient talking points for a draft section |
 
 ### Standard Error Format
 
@@ -1042,13 +1043,40 @@ root object. A nullable `outline_section_id` represents a section created direct
 }
 ```
 
+#### POST `/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points`
+
+Generates three to five concise talking points that complement the selected draft section's saved
+content and the rest of the article. `section_id` is the draft section ID, so both outline-linked
+and directly-created sections are supported. The generated points are not persisted; the frontend
+can insert them into the Lexical editor and save them with the draft `PATCH` endpoint.
+
+The request body is optional. When present, `instruction` can provide up to 1,000 characters of
+additional focus:
+
+```json
+{
+  "instruction": "Focus on the operational costs"
+}
+```
+
+```json
+{
+  "section_id": "20000000-0000-4000-8000-000000000000",
+  "points": [
+    "Clarify who owns each publishing stage.",
+    "Show how inconsistent review cycles create delays.",
+    "Connect unclear completion criteria to repeated rework."
+  ]
+}
+```
+
 Possible draft endpoint responses:
 
 | Status | Error code | Meaning |
 | --- | --- | --- |
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
-| `404 Not Found` | `article_not_found`, `outline_not_found`, or `draft_not_found` | A required owned resource does not exist |
-| `422 Unprocessable Entity` | `validation_error` | Draft input validation failed |
-| `502 Bad Gateway` | Service-specific | A future upstream drafting service returned an invalid response |
-| `503 Service Unavailable` | Service-specific | A required service is temporarily unavailable |
-| `504 Gateway Timeout` | Service-specific | A required service timed out |
+| `404 Not Found` | `article_not_found`, `brief_not_found`, `outline_not_found`, `draft_not_found`, or `draft_section_not_found` | A required owned resource does not exist |
+| `422 Unprocessable Entity` | `validation_error` or `talking_points_generation_blocked` | Input validation failed or Vertex rejected the article content |
+| `502 Bad Gateway` | `talking_points_generation_failed` | Vertex returned invalid talking-point output |
+| `503 Service Unavailable` | `talking_points_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `504 Gateway Timeout` | `talking_points_generation_timeout` | Talking-point generation exceeded the configured timeout |

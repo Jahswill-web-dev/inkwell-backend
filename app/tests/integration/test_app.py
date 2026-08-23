@@ -45,12 +45,16 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
     assert "/api/v1/articles/{article_id}/brief" in paths
     assert "/api/v1/articles/{article_id}/outline" in paths
     assert "/api/v1/articles/{article_id}/draft" in paths
+    assert (
+        "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points" in paths
+    )
     assert {path for path in paths if path.startswith("/api/v1/")} == {
         "/api/v1/articles",
         "/api/v1/articles/{article_id}",
         "/api/v1/articles/{article_id}/brief",
         "/api/v1/articles/{article_id}/outline",
         "/api/v1/articles/{article_id}/draft",
+        "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points",
         "/api/v1/auth/login",
         "/api/v1/auth/me",
         "/api/v1/auth/register",

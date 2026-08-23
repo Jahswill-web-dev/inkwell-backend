@@ -24,6 +24,7 @@ from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.schemas.brief import GeneratedBrief
 from app.schemas.outline import GeneratedOutline
+from app.schemas.talking_points import GeneratedTalkingPoints
 from app.services.ai_service import (
     BriefGenerationResult,
     BriefProviderBlockedError,
@@ -33,6 +34,8 @@ from app.services.ai_service import (
     BriefSource,
     OutlineGenerationResult,
     OutlineSource,
+    TalkingPointsGenerationResult,
+    TalkingPointsSource,
 )
 from app.tests.integration.test_database import alembic_config, require_test_url
 
@@ -110,6 +113,30 @@ class RaisingOutlineGenerator:
         raise self.error
 
 
+class FakeTalkingPointsGenerator:
+    def __init__(self) -> None:
+        self.calls: list[TalkingPointsSource] = []
+
+    async def generate(self, source: TalkingPointsSource) -> TalkingPointsGenerationResult:
+        self.calls.append(source)
+        return TalkingPointsGenerationResult(
+            talking_points=GeneratedTalkingPoints(
+                points=["Develop the first idea", "Connect the second idea", "Conclude the point"]
+            ),
+            model_id="fake-gemini",
+            input_token_count=60,
+            output_token_count=30,
+        )
+
+
+class RaisingTalkingPointsGenerator:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def generate(self, _source: TalkingPointsSource) -> TalkingPointsGenerationResult:
+        raise self.error
+
+
 async def clear_database(settings: Settings) -> None:
     engine = create_engine(settings)
     factory = create_session_factory(engine)
@@ -151,6 +178,18 @@ async def article_outline_count(settings: Settings) -> int:
     try:
         async with factory() as session:
             return (await session.scalar(select(func.count()).select_from(ArticleOutline))) or 0
+    finally:
+        await engine.dispose()
+
+
+async def delete_article_brief(settings: Settings, article_id: UUID) -> None:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with factory.begin() as session:
+            await session.execute(
+                delete(ArticleBrief).where(ArticleBrief.article_id == article_id)
+            )
     finally:
         await engine.dispose()
 
@@ -216,6 +255,7 @@ def article_context(settings: Settings) -> Iterator[tuple[TestClient, Settings]]
             test_settings,
             brief_generator=FakeBriefGenerator(),
             outline_generator=FakeOutlineGenerator(),
+            talking_points_generator=FakeTalkingPointsGenerator(),
         )
     ) as client:
         yield client, test_settings
@@ -1037,3 +1077,212 @@ def test_article_draft_is_owner_scoped(
         response = getattr(client, method)(path, **kwargs)
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "article_not_found"
+
+
+def test_generate_talking_points_uses_full_context_without_mutating_draft(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, "talking_points")
+    article = create_article(client, token)
+    brief = client.post(
+        f"/api/v1/articles/{article['id']}/brief", headers=headers(token)
+    )
+    assert brief.status_code == 200
+    outline = client.post(
+        f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
+    )
+    assert outline.status_code == 200
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+    draft["sections"][0]["editor_state"] = json.dumps(
+        {
+            "root": {
+                "type": "root",
+                "version": 1,
+                "children": [
+                    {
+                        "type": "paragraph",
+                        "children": [{"type": "text", "text": "Existing opening."}],
+                    }
+                ],
+            }
+        }
+    )
+    standalone_id = str(uuid4())
+    draft["sections"].append(
+        {
+            "id": standalone_id,
+            "outline_section_id": None,
+            "title": "A standalone section",
+            "goal": "Develop a supporting idea",
+            "checklist": [],
+            "editor_state": '{"root":{"children":[],"type":"root","version":1}}',
+        }
+    )
+    saved = client.patch(
+        draft_path, json={"sections": draft["sections"]}, headers=headers(token)
+    ).json()
+
+    selected_id = saved["sections"][0]["id"]
+    endpoint = f"{draft_path}/sections/{selected_id}/talking-points"
+    response = client.post(endpoint, headers=headers(token))
+    standalone_response = client.post(
+        f"{draft_path}/sections/{standalone_id}/talking-points",
+        json={"instruction": "  Focus on costs  "},
+        headers=headers(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "section_id": selected_id,
+        "points": [
+            "Develop the first idea",
+            "Connect the second idea",
+            "Conclude the point",
+        ],
+    }
+    assert standalone_response.status_code == 200
+    assert client.get(draft_path, headers=headers(token)).json() == saved
+
+    application = cast(FastAPI, client.app)
+    generator = cast(FakeTalkingPointsGenerator, application.state.talking_points_generator)
+    assert generator.calls[0].instruction is None
+    assert generator.calls[1].instruction == "Focus on costs"
+    context = generator.calls[0].context
+    assert context["selected_section_id"] == selected_id
+    assert cast(dict[str, object], context["article"])["working_title"] == article[
+        "working_title"
+    ]
+    assert cast(list[dict[str, object]], context["draft_sections"])[0][
+        "editor_text"
+    ] == "Existing opening."
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        ({}, 200),
+        ({"instruction": ""}, 422),
+        ({"instruction": "Valid", "unexpected": True}, 422),
+    ],
+)
+def test_talking_points_request_validation(
+    article_context: tuple[TestClient, Settings],
+    payload: dict[str, object],
+    expected_status: int,
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, f"tp_valid_{len(str(payload))}")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+
+    response = client.post(
+        f"{draft_path}/sections/{draft['sections'][0]['id']}/talking-points",
+        json=payload,
+        headers=headers(token),
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 422:
+        assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_talking_points_requires_owned_draft_section(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, _settings = article_context
+    owner_token, _owner = register(client, "talking_points_owner")
+    other_token, _other = register(client, "talking_points_other")
+    article = create_article(client, owner_token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(owner_token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(owner_token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(owner_token)).json()
+    endpoint = f"{draft_path}/sections/{draft['sections'][0]['id']}/talking-points"
+
+    assert client.post(endpoint).status_code == 401
+    hidden = client.post(endpoint, headers=headers(other_token))
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "article_not_found"
+    missing = client.post(
+        f"{draft_path}/sections/{uuid4()}/talking-points", headers=headers(owner_token)
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "draft_section_not_found"
+
+
+def test_talking_points_handles_missing_resources_and_deleted_outline(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = article_context
+    token, _user = register(client, "tp_resources")
+    article = create_article(client, token)
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    without_draft = client.post(
+        f"{draft_path}/sections/{uuid4()}/talking-points", headers=headers(token)
+    )
+    assert without_draft.status_code == 404
+    assert without_draft.json()["error"]["code"] == "draft_not_found"
+
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft = client.post(draft_path, headers=headers(token)).json()
+    section_id = draft["sections"][0]["id"]
+    assert client.delete(
+        f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
+    ).status_code == 204
+    without_outline = client.post(
+        f"{draft_path}/sections/{section_id}/talking-points", headers=headers(token)
+    )
+    assert without_outline.status_code == 200
+    application = cast(FastAPI, client.app)
+    generator = cast(FakeTalkingPointsGenerator, application.state.talking_points_generator)
+    assert generator.calls[-1].context["outline"] == []
+
+    asyncio.run(delete_article_brief(settings, UUID(cast(str, article["id"]))))
+    without_brief = client.post(
+        f"{draft_path}/sections/{section_id}/talking-points", headers=headers(token)
+    )
+    assert without_brief.status_code == 404
+    assert without_brief.json()["error"]["code"] == "brief_not_found"
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code", "code"),
+    [
+        (BriefProviderTimeoutError(), 504, "talking_points_generation_timeout"),
+        (BriefProviderBlockedError(), 422, "talking_points_generation_blocked"),
+        (BriefProviderResponseError(), 502, "talking_points_generation_failed"),
+        (BriefProviderUnavailableError(), 503, "talking_points_generation_unavailable"),
+    ],
+)
+def test_talking_points_maps_generation_errors(
+    article_context: tuple[TestClient, Settings],
+    error: Exception,
+    status_code: int,
+    code: str,
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, f"tp_fail_{status_code}")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+    application = cast(FastAPI, client.app)
+    original_generator = application.state.talking_points_generator
+    application.state.talking_points_generator = RaisingTalkingPointsGenerator(error)
+    try:
+        response = client.post(
+            f"{draft_path}/sections/{draft['sections'][0]['id']}/talking-points",
+            headers=headers(token),
+        )
+    finally:
+        application.state.talking_points_generator = original_generator
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == code
