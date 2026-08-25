@@ -50,3 +50,24 @@ def test_rejects_placeholder_secret_in_production() -> None:
 def test_rejects_non_positive_login_rate_limit_settings(field: str) -> None:
     with pytest.raises(ValidationError):
         valid_settings(**{field: 0})
+
+
+def test_openrouter_defaults_and_normalization() -> None:
+    settings = valid_settings(
+        openrouter_api_key="   ",
+        openrouter_base_url="https://openrouter.ai/api/v1/",
+    )
+
+    assert settings.ai_provider == "vertex"
+    assert settings.openrouter_api_key is None
+    assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"
+    assert settings.openrouter_model_id == "deepseek/deepseek-v4-pro-0813"
+    assert settings.openrouter_data_collection == "deny"
+    assert settings.openrouter_allow_fallbacks is True
+
+
+def test_rejects_invalid_openrouter_configuration() -> None:
+    with pytest.raises(ValidationError, match="OPENROUTER_BASE_URL"):
+        valid_settings(openrouter_base_url="openrouter.ai/api/v1")
+    with pytest.raises(ValidationError):
+        valid_settings(ai_provider="unknown")

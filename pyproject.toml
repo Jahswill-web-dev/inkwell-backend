@@ -9,6 +9,7 @@ dependencies = [
     "email-validator>=2.2,<3",
     "fastapi>=0.116,<1",
     "google-genai>=1.30,<2",
+    "httpx>=0.28,<1",
     "psycopg[binary,pool]>=3.2,<4",
     "pydantic-settings>=2.10,<3",
     "pwdlib[argon2]>=0.2,<1",
@@ -19,7 +20,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28,<1",
     "mypy>=1.16,<2",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.0,<2",
@@ -33,6 +33,7 @@ addopts = "--strict-markers --strict-config --cov=app --cov-report=term-missing"
 asyncio_mode = "auto"
 markers = [
     "database: requires the isolated PostgreSQL test service",
+    "openrouter: requires a live OpenRouter API key",
     "vertex: requires live Vertex AI credentials and configuration",
 ]
 

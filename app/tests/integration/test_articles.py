@@ -19,11 +19,13 @@ from app.db.models.article_brief import ArticleBrief
 from app.db.models.article_draft import ArticleDraft
 from app.db.models.article_outline import ArticleOutline
 from app.db.models.login_rate_limit import LoginRateLimit
+from app.db.models.section_interview import SectionInterview
 from app.db.models.user import User
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.schemas.brief import GeneratedBrief
 from app.schemas.outline import GeneratedOutline
+from app.schemas.section_interview import GeneratedSectionDraft, GeneratedSectionQuestions
 from app.schemas.talking_points import GeneratedTalkingPoints
 from app.services.ai_service import (
     BriefGenerationResult,
@@ -36,6 +38,10 @@ from app.services.ai_service import (
     OutlineSource,
     TalkingPointsGenerationResult,
     TalkingPointsSource,
+)
+from app.services.section_interview_ai import (
+    SectionDraftResult,
+    SectionQuestionsResult,
 )
 from app.tests.integration.test_database import alembic_config, require_test_url
 
@@ -137,11 +143,57 @@ class RaisingTalkingPointsGenerator:
         raise self.error
 
 
+class FakeSectionInterviewGenerator:
+    def __init__(self) -> None:
+        self.question_calls: list[tuple[dict[str, object], str | None]] = []
+        self.draft_calls: list[tuple[dict[str, object], list[dict[str, object]]]] = []
+
+    async def generate_questions(
+        self, context: dict[str, object], instruction: str | None
+    ) -> SectionQuestionsResult:
+        self.question_calls.append((context, instruction))
+        return SectionQuestionsResult(
+            questions=GeneratedSectionQuestions.model_validate(
+                {
+                    "questions": [
+                        {
+                            "missing_piece": "A concrete example",
+                            "question": "What happened in your experience?",
+                            "answer_guidance": "Describe the situation and outcome.",
+                        },
+                        {
+                            "missing_piece": "A lesson",
+                            "question": "What did you change afterward?",
+                            "answer_guidance": "Name the practical change.",
+                        },
+                    ]
+                }
+            ),
+            model_id="fake-gemini",
+            input_token_count=40,
+            output_token_count=30,
+        )
+
+    async def generate_draft(
+        self, context: dict[str, object], questions_and_answers: list[dict[str, object]]
+    ) -> SectionDraftResult:
+        self.draft_calls.append((context, questions_and_answers))
+        return SectionDraftResult(
+            draft=GeneratedSectionDraft.model_validate(
+                {"blocks": [{"type": "paragraph", "text": "A complete proposed section."}]}
+            ),
+            model_id="fake-gemini",
+            input_token_count=80,
+            output_token_count=60,
+        )
+
+
 async def clear_database(settings: Settings) -> None:
     engine = create_engine(settings)
     factory = create_session_factory(engine)
     try:
         async with factory.begin() as session:
+            await session.execute(delete(SectionInterview))
             await session.execute(delete(ArticleDraft))
             await session.execute(delete(ArticleOutline))
             await session.execute(delete(ArticleBrief))
@@ -187,11 +239,26 @@ async def delete_article_brief(settings: Settings, article_id: UUID) -> None:
     factory = create_session_factory(engine)
     try:
         async with factory.begin() as session:
-            await session.execute(
-                delete(ArticleBrief).where(ArticleBrief.article_id == article_id)
-            )
+            await session.execute(delete(ArticleBrief).where(ArticleBrief.article_id == article_id))
     finally:
         await engine.dispose()
+
+
+async def make_interview_question_legacy(settings: Settings, interview_id: UUID) -> str:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    legacy_question = f"What happened {'after that ' * 15}?"
+    try:
+        async with factory.begin() as session:
+            interview = await session.get(SectionInterview, interview_id)
+            assert interview is not None
+            questions = [dict(question) for question in interview.questions]
+            questions[0]["question"] = legacy_question
+            questions[0]["answer_guidance"] = "x" * 100
+            interview.questions = questions
+    finally:
+        await engine.dispose()
+    return legacy_question
 
 
 async def invalid_goal_is_constrained(settings: Settings, user_id: UUID) -> bool:
@@ -256,6 +323,7 @@ def article_context(settings: Settings) -> Iterator[tuple[TestClient, Settings]]
             brief_generator=FakeBriefGenerator(),
             outline_generator=FakeOutlineGenerator(),
             talking_points_generator=FakeTalkingPointsGenerator(),
+            section_interview_generator=FakeSectionInterviewGenerator(),
         )
     ) as client:
         yield client, test_settings
@@ -739,9 +807,7 @@ def test_outline_full_lifecycle_uses_latest_brief(
         }
         for index in range(3)
     ]
-    edited = client.patch(
-        outline_path, json={"sections": changed_sections}, headers=headers(token)
-    )
+    edited = client.patch(outline_path, json={"sections": changed_sections}, headers=headers(token))
     assert edited.status_code == 200
     assert edited.json()["sections"] == changed_sections
 
@@ -753,11 +819,14 @@ def test_outline_full_lifecycle_uses_latest_brief(
     assert unknown.status_code == 422
     assert unknown.json()["error"]["code"] == "validation_error"
 
-    assert client.patch(
-        brief_path,
-        json={"core_angle": "The latest saved angle"},
-        headers=headers(token),
-    ).status_code == 200
+    assert (
+        client.patch(
+            brief_path,
+            json={"core_angle": "The latest saved angle"},
+            headers=headers(token),
+        ).status_code
+        == 200
+    )
     stale_edit = client.patch(
         outline_path, json={"sections": changed_sections}, headers=headers(token)
     )
@@ -794,10 +863,12 @@ def test_article_outline_is_owner_scoped(
     assert client.post(outline_path, headers=headers(owner_token)).status_code == 200
     kwargs: dict[str, object] = {"headers": headers(other_token)}
     if method == "patch":
-        kwargs["json"] = {"sections": [
-            {"heading": str(index), "purpose": "Purpose", "key_points": ["Point"]}
-            for index in range(3)
-        ]}
+        kwargs["json"] = {
+            "sections": [
+                {"heading": str(index), "purpose": "Purpose", "key_points": ["Point"]}
+                for index in range(3)
+            ]
+        }
 
     response = getattr(client, method)(outline_path, **kwargs)
 
@@ -812,9 +883,7 @@ def test_outline_requires_an_existing_brief(
     token, _user = register(client, "outline_without_brief")
     article = create_article(client, token)
 
-    response = client.post(
-        f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
-    )
+    response = client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "brief_not_found"
@@ -906,16 +975,15 @@ def test_article_outline_maps_provider_failures(
     client, _settings = article_context
     token, _user = register(client, f"outline_failure_{status_code}")
     article = create_article(client, token)
-    assert client.post(
-        f"/api/v1/articles/{article['id']}/brief", headers=headers(token)
-    ).status_code == 200
+    assert (
+        client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token)).status_code
+        == 200
+    )
     application = cast(FastAPI, client.app)
     original_generator = application.state.outline_generator
     application.state.outline_generator = RaisingOutlineGenerator(error)
     try:
-        response = client.post(
-            f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
-        )
+        response = client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
     finally:
         application.state.outline_generator = original_generator
 
@@ -931,9 +999,7 @@ def test_draft_lifecycle_and_outline_reconciliation(
     article = create_article(client, token)
     outline_path = f"/api/v1/articles/{article['id']}/outline"
     draft_path = f"/api/v1/articles/{article['id']}/draft"
-    brief = client.post(
-        f"/api/v1/articles/{article['id']}/brief", headers=headers(token)
-    )
+    brief = client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
     assert brief.status_code == 200
 
     missing = client.get(draft_path, headers=headers(token))
@@ -962,9 +1028,7 @@ def test_draft_lifecycle_and_outline_reconciliation(
     saved_sections[0]["checklist"] = [
         {"id": "opening", "label": "Set the context", "completed": True}
     ]
-    saved_sections[0]["editor_state"] = (
-        '{"root":{"children":[],"type":"root","version":1}}'
-    )
+    saved_sections[0]["editor_state"] = '{"root":{"children":[],"type":"root","version":1}}'
     standalone_id = str(uuid4())
     saved_sections.append(
         {
@@ -1061,12 +1125,18 @@ def test_article_draft_is_owner_scoped(
     other_token, _other = register(client, "draft_other")
     article = create_article(client, owner_token)
     article_id = article["id"]
-    assert client.post(
-        f"/api/v1/articles/{article_id}/brief", headers=headers(owner_token)
-    ).status_code == 200
-    assert client.post(
-        f"/api/v1/articles/{article_id}/outline", headers=headers(owner_token)
-    ).status_code == 200
+    assert (
+        client.post(
+            f"/api/v1/articles/{article_id}/brief", headers=headers(owner_token)
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/v1/articles/{article_id}/outline", headers=headers(owner_token)
+        ).status_code
+        == 200
+    )
     path = f"/api/v1/articles/{article_id}/draft"
     assert client.post(path, headers=headers(owner_token)).status_code == 200
 
@@ -1085,13 +1155,9 @@ def test_generate_talking_points_uses_full_context_without_mutating_draft(
     client, _settings = article_context
     token, _user = register(client, "talking_points")
     article = create_article(client, token)
-    brief = client.post(
-        f"/api/v1/articles/{article['id']}/brief", headers=headers(token)
-    )
+    brief = client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
     assert brief.status_code == 200
-    outline = client.post(
-        f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
-    )
+    outline = client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
     assert outline.status_code == 200
     draft_path = f"/api/v1/articles/{article['id']}/draft"
     draft = client.post(draft_path, headers=headers(token)).json()
@@ -1151,12 +1217,11 @@ def test_generate_talking_points_uses_full_context_without_mutating_draft(
     assert generator.calls[1].instruction == "Focus on costs"
     context = generator.calls[0].context
     assert context["selected_section_id"] == selected_id
-    assert cast(dict[str, object], context["article"])["working_title"] == article[
-        "working_title"
-    ]
-    assert cast(list[dict[str, object]], context["draft_sections"])[0][
-        "editor_text"
-    ] == "Existing opening."
+    assert cast(dict[str, object], context["article"])["working_title"] == article["working_title"]
+    assert (
+        cast(list[dict[str, object]], context["draft_sections"])[0]["editor_text"]
+        == "Existing opening."
+    )
 
 
 @pytest.mark.parametrize(
@@ -1232,9 +1297,12 @@ def test_talking_points_handles_missing_resources_and_deleted_outline(
     client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
     draft = client.post(draft_path, headers=headers(token)).json()
     section_id = draft["sections"][0]["id"]
-    assert client.delete(
-        f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
-    ).status_code == 204
+    assert (
+        client.delete(
+            f"/api/v1/articles/{article['id']}/outline", headers=headers(token)
+        ).status_code
+        == 204
+    )
     without_outline = client.post(
         f"{draft_path}/sections/{section_id}/talking-points", headers=headers(token)
     )
@@ -1286,3 +1354,120 @@ def test_talking_points_maps_generation_errors(
 
     assert response.status_code == status_code
     assert response.json()["error"]["code"] == code
+
+
+def test_section_interview_persists_answers_and_generates_without_mutating_draft(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = article_context
+    token, _user = register(client, "section_interview")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    original_draft = client.post(draft_path, headers=headers(token)).json()
+    section_id = original_draft["sections"][0]["id"]
+    base = f"{draft_path}/sections/{section_id}/interviews"
+
+    created = client.post(
+        base, json={"instruction": "  Focus on lived experience  "}, headers=headers(token)
+    )
+    assert created.status_code == 200
+    interview = created.json()
+    assert interview["status"] == "awaiting_answers"
+    assert len(interview["questions"]) == 2
+    assert interview["answers"] == []
+    assert interview["generated_blocks"] is None
+    assert interview["is_stale"] is False
+    interview_id = interview["id"]
+
+    assert client.get(f"{base}/latest", headers=headers(token)).json()["id"] == interview_id
+    assert client.get(f"{base}/{interview_id}", headers=headers(token)).json() == interview
+
+    without_answers = client.post(f"{base}/{interview_id}/generate", headers=headers(token))
+    assert without_answers.status_code == 422
+    assert without_answers.json()["error"]["code"] == "section_answers_required"
+
+    question_id = interview["questions"][0]["id"]
+    saved = client.patch(
+        f"{base}/{interview_id}/answers",
+        json={"answers": [{"question_id": question_id, "answer": "  We changed ownership.  "}]},
+        headers=headers(token),
+    )
+    assert saved.status_code == 200
+    assert saved.json()["answers"] == [
+        {"question_id": question_id, "answer": "We changed ownership."}
+    ]
+
+    generated = client.post(f"{base}/{interview_id}/generate", headers=headers(token))
+    assert generated.status_code == 200
+    assert generated.json()["status"] == "generated"
+    assert generated.json()["generated_blocks"] == [
+        {"type": "paragraph", "text": "A complete proposed section."}
+    ]
+    assert client.get(draft_path, headers=headers(token)).json() == original_draft
+
+    application = cast(FastAPI, client.app)
+    generator = cast(FakeSectionInterviewGenerator, application.state.section_interview_generator)
+    context, instruction = generator.question_calls[-1]
+    assert instruction == "Focus on lived experience"
+    assert cast(dict[str, object], context["selected_section"])["id"] == section_id
+    assert generator.draft_calls[-1][1][0]["answer"] == "We changed ownership."
+
+    legacy_question = asyncio.run(make_interview_question_legacy(settings, UUID(interview_id)))
+    legacy = client.get(f"{base}/{interview_id}", headers=headers(token))
+    assert legacy.status_code == 200
+    assert legacy.json()["questions"][0]["question"] == legacy_question
+    assert len(legacy.json()["questions"][0]["answer_guidance"]) == 100
+
+
+def test_section_interview_detects_changed_context_and_enforces_ownership(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, _settings = article_context
+    owner_token, _owner = register(client, "interview_owner")
+    other_token, _other = register(client, "interview_other")
+    article = create_article(client, owner_token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(owner_token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(owner_token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(owner_token)).json()
+    section_id = draft["sections"][0]["id"]
+    base = f"{draft_path}/sections/{section_id}/interviews"
+    interview = client.post(base, headers=headers(owner_token)).json()
+    question_id = interview["questions"][0]["id"]
+    client.patch(
+        f"{base}/{interview['id']}/answers",
+        json={"answers": [{"question_id": question_id, "answer": "A useful answer"}]},
+        headers=headers(owner_token),
+    )
+
+    hidden = client.get(f"{base}/{interview['id']}", headers=headers(other_token))
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "article_not_found"
+
+    draft["sections"][0]["editor_state"] = json.dumps(
+        {
+            "root": {
+                "type": "root",
+                "version": 1,
+                "children": [
+                    {"type": "paragraph", "children": [{"type": "text", "text": "New text"}]}
+                ],
+            }
+        }
+    )
+    assert (
+        client.patch(
+            draft_path, json={"sections": draft["sections"]}, headers=headers(owner_token)
+        ).status_code
+        == 200
+    )
+
+    assert (
+        client.get(f"{base}/{interview['id']}", headers=headers(owner_token)).json()["is_stale"]
+        is True
+    )
+    stale = client.post(f"{base}/{interview['id']}/generate", headers=headers(owner_token))
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "section_interview_stale"

@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from app.prompts.talking_points import build_talking_points_prompt
 from app.schemas.talking_points import GeneratedTalkingPoints, TalkingPointsRequest
-from app.services.talking_points_service import (
+from app.services.draft_context import (
     OTHER_TEXT_LIMIT,
     SELECTED_TEXT_LIMIT,
     TOTAL_DRAFT_TEXT_LIMIT,

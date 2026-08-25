@@ -12,7 +12,7 @@ validation, and infrastructure concerns remain separate as the application grows
 - SQLAlchemy 2 with async psycopg
 - Alembic database migrations
 - Pydantic and pydantic-settings
-- Google Gen AI SDK with Gemini on Vertex AI
+- OpenRouter with DeepSeek, or Gemini on Vertex AI
 - Argon2 password hashing with pwdlib
 - JWT authentication with PyJWT
 - uv for dependency and virtual-environment management
@@ -77,9 +77,38 @@ Copy-Item .env.example .env
 Replace `JWT_SECRET_KEY` in `.env` with a private random value containing at least 32 characters.
 Do not commit the `.env` file.
 
-### 3. Configure Vertex AI
+### 3. Configure an AI provider
 
-Brief generation requires a Google Cloud project with billing and the Vertex AI API enabled. Install
+The backend supports OpenRouter and Vertex AI. `AI_PROVIDER` selects one provider for all AI
+workflows; there is no automatic fallback between them.
+
+#### OpenRouter
+
+Create an OpenRouter API key and configure:
+
+```env
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL_ID=deepseek/deepseek-v4-pro-0813
+OPENROUTER_REQUEST_TIMEOUT_SECONDS=60
+OPENROUTER_MAX_OUTPUT_TOKENS=4096
+OPENROUTER_DATA_COLLECTION=deny
+OPENROUTER_ALLOW_FALLBACKS=true
+```
+
+The API key stays server-side and must not be committed. OpenRouter may fail over among eligible
+providers serving the configured model, but it does not switch models or fall back to Vertex.
+`OPENROUTER_DATA_COLLECTION=deny` excludes upstream providers that may retain prompts for training,
+and required-parameter routing ensures the selected endpoint supports JSON response formatting.
+
+DeepSeek V4 Pro returns JSON without enforcing the supplied JSON Schema. The backend therefore
+validates every response with Pydantic and makes one repair request before returning a generation
+failure.
+
+#### Vertex AI
+
+Vertex requires a Google Cloud project with billing and the Vertex AI API enabled. Install
 the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install), then run:
 
 ```powershell
@@ -102,6 +131,7 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID `
 Configure the backend in `.env`:
 
 ```env
+AI_PROVIDER=vertex
 VERTEX_PROJECT_ID=your-google-cloud-project-id
 VERTEX_LOCATION=global
 VERTEX_MODEL_ID=gemini-2.5-flash
@@ -112,8 +142,8 @@ VERTEX_MAX_OUTPUT_TOKENS=4096
 Application Default Credentials are discovered automatically and must not be copied into `.env`.
 For production on Google Cloud, attach a dedicated service account to the workload. For deployments
 outside Google Cloud, prefer Workload Identity Federation instead of a downloadable service-account
-key. If `VERTEX_PROJECT_ID` is unset, the API still starts, but brief generation returns
-`503 brief_generation_unavailable`.
+key. If the selected provider's credentials are unset, the API still starts, but generation
+endpoints return their existing operation-specific `503` errors.
 
 ### 4. Start PostgreSQL
 
@@ -188,6 +218,16 @@ $env:RUN_VERTEX_SMOKE_TEST="true"
 uv run pytest app/tests/integration/test_vertex_smoke.py
 ```
 
+To exercise all OpenRouter output schemas with real requests, run:
+
+```powershell
+$env:RUN_OPENROUTER_SMOKE_TEST="true"
+uv run python -m pytest app/tests/integration/test_openrouter_smoke.py
+```
+
+To roll back from OpenRouter to Vertex, restore valid Google credentials, set
+`AI_PROVIDER=vertex`, and restart the API.
+
 ## Code Quality
 
 ```powershell
@@ -220,7 +260,7 @@ docker compose down
 
 This section is the integration contract for the endpoints currently exposed by the backend.
 Article intake routes persist source material and can generate structured editorial briefs and
-outlines through Gemini on Vertex AI and persists editable article drafts. Review routes remain
+outlines through the configured AI provider and persists editable article drafts. Review routes remain
 scaffolds.
 
 ### Connection Details
@@ -274,6 +314,11 @@ allows `http://localhost:3000`.
 | `POST` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Idempotently create an article draft |
 | `PATCH` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Replace a draft's ordered sections |
 | `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points` | Bearer token | `200 OK` | Generate transient talking points for a draft section |
+| `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews` | Bearer token | `200 OK` | Generate and persist section interview questions |
+| `GET` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/latest` | Bearer token | `200 OK` | Retrieve the latest section interview |
+| `GET` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}` | Bearer token | `200 OK` | Retrieve a specific section interview |
+| `PATCH` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}/answers` | Bearer token | `200 OK` | Replace the saved interview answers |
+| `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}/generate` | Bearer token | `200 OK` | Generate a structured section proposal from saved answers |
 
 ### Standard Error Format
 
@@ -814,7 +859,7 @@ Possible article endpoint responses:
 
 ### Article briefs
 
-Article brief endpoints synchronously call Gemini on Vertex AI and may take several seconds. The
+Article brief endpoints synchronously call the configured AI provider and may take several seconds. The
 backend sends the saved article's working title, notes, target audiences, and goal to Gemini and
 validates the generated JSON before saving it. It does not send user credentials or authentication
 tokens to Gemini.
@@ -920,9 +965,9 @@ Possible brief endpoint responses:
 | --- | --- | --- |
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
 | `404 Not Found` | `article_not_found` or `brief_not_found` | The owned article or its brief does not exist |
-| `422 Unprocessable Entity` | `brief_generation_blocked` | Vertex AI rejected the supplied content |
-| `502 Bad Gateway` | `brief_generation_failed` | Vertex returned missing or invalid structured output |
-| `503 Service Unavailable` | `brief_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `422 Unprocessable Entity` | `brief_generation_blocked` | The configured provider rejected the supplied content |
+| `502 Bad Gateway` | `brief_generation_failed` | The provider returned missing or invalid structured output |
+| `503 Service Unavailable` | `brief_generation_unavailable` | Provider configuration, credentials, quota, or service is unavailable |
 | `504 Gateway Timeout` | `brief_generation_timeout` | Generation exceeded the configured timeout |
 
 ### Article outlines
@@ -994,9 +1039,9 @@ Possible outline endpoint responses:
 | --- | --- | --- |
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
 | `404 Not Found` | `article_not_found`, `brief_not_found`, or `outline_not_found` | A required owned resource does not exist |
-| `422 Unprocessable Entity` | `validation_error` or `outline_generation_blocked` | Input validation failed or Vertex rejected the brief |
-| `502 Bad Gateway` | `outline_generation_failed` | Vertex returned missing or invalid structured output |
-| `503 Service Unavailable` | `outline_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `422 Unprocessable Entity` | `validation_error` or `outline_generation_blocked` | Input validation failed or the provider rejected the brief |
+| `502 Bad Gateway` | `outline_generation_failed` | The provider returned missing or invalid structured output |
+| `503 Service Unavailable` | `outline_generation_unavailable` | Provider configuration, credentials, quota, or service is unavailable |
 | `504 Gateway Timeout` | `outline_generation_timeout` | Generation exceeded the configured timeout |
 
 ### Article drafts
@@ -1076,7 +1121,239 @@ Possible draft endpoint responses:
 | --- | --- | --- |
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
 | `404 Not Found` | `article_not_found`, `brief_not_found`, `outline_not_found`, `draft_not_found`, or `draft_section_not_found` | A required owned resource does not exist |
-| `422 Unprocessable Entity` | `validation_error` or `talking_points_generation_blocked` | Input validation failed or Vertex rejected the article content |
-| `502 Bad Gateway` | `talking_points_generation_failed` | Vertex returned invalid talking-point output |
-| `503 Service Unavailable` | `talking_points_generation_unavailable` | Vertex configuration, credentials, quota, or service is unavailable |
+| `422 Unprocessable Entity` | `validation_error` or `talking_points_generation_blocked` | Input validation failed or the provider rejected the article content |
+| `502 Bad Gateway` | `talking_points_generation_failed` | The provider returned invalid talking-point output |
+| `503 Service Unavailable` | `talking_points_generation_unavailable` | Provider configuration, credentials, quota, or service is unavailable |
 | `504 Gateway Timeout` | `talking_points_generation_timeout` | Talking-point generation exceeded the configured timeout |
+
+### Section interviews
+
+Section interviews are persistent and scoped to one embedded draft section. Creating an interview
+uses the selected section as the primary context and generates two to four questions about missing
+experience, examples, decisions, lessons, or outcomes. An optional `instruction` field accepts up
+to 1,000 characters.
+
+The intended frontend flow is:
+
+1. Create an interview and display its questions.
+2. Save the complete current answer collection whenever the user edits or leaves the form.
+3. Generate a proposal after at least one question has a nonblank answer.
+4. Render the returned blocks for review.
+5. If accepted, convert the blocks to Lexical nodes and save them through the existing draft
+   `PATCH` endpoint. Interview generation never changes the draft itself.
+
+All endpoints require the same bearer token used by the other article endpoints. The `section_id`
+is the ID of an item in the draft's `sections` array, not an outline section ID.
+
+#### Shared response shape
+
+All five endpoints return the current interview on success:
+
+```json
+{
+  "id": "40000000-0000-4000-8000-000000000000",
+  "draft_id": "30000000-0000-4000-8000-000000000000",
+  "section_id": "20000000-0000-4000-8000-000000000000",
+  "status": "awaiting_answers",
+  "questions": [
+    {
+      "id": "50000000-0000-4000-8000-000000000000",
+      "missing_piece": "A concrete personal example",
+      "question": "Can you describe a time when unclear ownership delayed publishing?",
+      "answer_guidance": "Mention what happened, who was involved, and the outcome."
+    },
+    {
+      "id": "50000000-0000-4000-8000-000000000001",
+      "missing_piece": "A lesson learned",
+      "question": "What did you change after that experience?",
+      "answer_guidance": null
+    }
+  ],
+  "answers": [],
+  "generated_blocks": null,
+  "is_stale": false,
+  "created_at": "2026-08-25T12:00:00Z",
+  "updated_at": "2026-08-25T12:00:00Z"
+}
+```
+
+`status` is either `awaiting_answers` or `generated`. `is_stale` means relevant article, brief,
+outline, or draft context changed after the questions were created. A stale interview can still be
+displayed and its answers can still be saved, but it cannot generate a proposal.
+
+Newly generated `question` values contain exactly one direct question sentence and are limited to
+120 characters. `answer_guidance` is an optional short hint: it is either `null` or a string of at
+most 80 characters. Older persisted interviews may contain longer values and remain readable.
+
+#### POST `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews`
+
+Creates a new interview every time it is called. Existing interviews are not deleted. The request
+body is optional:
+
+```json
+{
+  "instruction": "Focus on the writer's experience managing a small team"
+}
+```
+
+`instruction` must be nonblank when provided and cannot exceed 1,000 characters. Send no body or
+`{}` when no additional direction is needed. A successful response contains two to four questions
+and returns `200 OK` with `status: "awaiting_answers"`. Every newly generated question is one
+sentence of at most 120 characters.
+
+```javascript
+const response = await fetch(
+  `${apiBase}/articles/${articleId}/draft/sections/${sectionId}/interviews`,
+  {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ instruction: "Focus on practical lessons" }),
+  },
+);
+const interview = await response.json();
+```
+
+#### GET `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/latest`
+
+Returns the most recently created interview for the section without calling the AI. Use this when
+restoring the editor after a reload. Returns `404 section_interview_not_found` if the section has no
+interviews.
+
+#### GET `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}`
+
+Returns a particular interview without calling the AI. The interview must belong to the article's
+current draft and the section specified in the URL.
+
+#### PATCH `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}/answers`
+
+Replaces the complete saved answer collection; it is not a partial merge. Send the frontend's full
+current collection on every save:
+
+```json
+{
+  "answers": [
+    {
+      "question_id": "50000000-0000-4000-8000-000000000000",
+      "answer": "Our editor and marketing lead both assumed the other person owned approval."
+    },
+    {
+      "question_id": "50000000-0000-4000-8000-000000000001",
+      "answer": null
+    }
+  ]
+}
+```
+
+Each question may appear at most once. `answer` accepts a trimmed string of up to 10,000
+characters; use `null`, an empty string, or omit that question from the collection to skip it.
+Unknown question IDs return `422 unknown_section_question`. Saving changed answers resets a
+previously generated interview to `awaiting_answers` and clears its previous proposal.
+
+#### POST `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}/generate`
+
+Accepts no request body. It uses the currently saved answers and returns a complete proposed
+replacement for the section. At least one answer must contain nonblank text, otherwise the endpoint
+returns `422 section_answers_required`.
+
+Successful generation returns `200 OK`, changes the interview status to `generated`, and populates
+`generated_blocks`. Selected fields from the response look like this:
+
+```json
+{
+  "status": "generated",
+  "generated_blocks": [
+    {
+      "type": "paragraph",
+      "text": "Publishing delays often look like scheduling problems, but our biggest delay came from unclear ownership."
+    },
+    {
+      "type": "subheading",
+      "text": "Make approval ownership explicit"
+    },
+    {
+      "type": "bulleted_list",
+      "items": [
+        "Name one owner for every publishing stage.",
+        "Document who can approve and who only provides feedback."
+      ]
+    },
+    {
+      "type": "numbered_list",
+      "items": [
+        "Assign the final approver.",
+        "Set a review deadline.",
+        "Publish or escalate when the deadline passes."
+      ]
+    }
+  ],
+  "is_stale": false
+}
+```
+
+The complete response also contains the shared interview fields shown above, including all saved
+questions and answers. Block payloads are:
+
+| Block type | Payload |
+| --- | --- |
+| `paragraph` | `{ "type": "paragraph", "text": "..." }` |
+| `subheading` | `{ "type": "subheading", "text": "..." }` |
+| `bulleted_list` | `{ "type": "bulleted_list", "items": ["..."] }` |
+| `numbered_list` | `{ "type": "numbered_list", "items": ["..."] }` |
+
+Calling the endpoint again regenerates and replaces the stored proposal. If `is_stale` is true,
+generation returns `409 section_interview_stale`; create a new interview to capture the latest
+context.
+
+#### Frontend types
+
+```typescript
+type SectionContentBlock =
+  | { type: "paragraph"; text: string }
+  | { type: "subheading"; text: string }
+  | { type: "bulleted_list"; items: string[] }
+  | { type: "numbered_list"; items: string[] };
+
+type SectionQuestion = {
+  id: string;
+  missing_piece: string;
+  question: string; // One sentence; newly generated values have at most 120 characters
+  answer_guidance: string | null; // Newly generated hints have at most 80 characters
+};
+
+type SectionAnswer = {
+  question_id: string;
+  answer: string | null;
+};
+
+type SectionInterview = {
+  id: string;
+  draft_id: string;
+  section_id: string;
+  status: "awaiting_answers" | "generated";
+  questions: SectionQuestion[];
+  answers: SectionAnswer[];
+  generated_blocks: SectionContentBlock[] | null;
+  is_stale: boolean;
+  created_at: string;
+  updated_at: string;
+};
+```
+
+#### Section interview errors
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found`, `draft_not_found`, `brief_not_found`, or `draft_section_not_found` | Required owned context does not exist |
+| `404 Not Found` | `section_interview_not_found` | No matching interview exists in this draft section |
+| `409 Conflict` | `section_interview_stale` | Relevant writing context changed after question generation |
+| `422 Unprocessable Entity` | `validation_error` | Request fields, UUIDs, answer lengths, or duplicate IDs are invalid |
+| `422 Unprocessable Entity` | `unknown_section_question` | An answer references a question outside this interview |
+| `422 Unprocessable Entity` | `section_answers_required` | No saved answer contains substantive text |
+| `422 Unprocessable Entity` | `section_questions_generation_blocked` or `section_draft_generation_blocked` | The provider rejected the supplied content |
+| `502 Bad Gateway` | `section_questions_generation_failed` or `section_draft_generation_failed` | The provider returned invalid structured output |
+| `503 Service Unavailable` | `section_questions_generation_unavailable` or `section_draft_generation_unavailable` | Generation is not configured or the provider is unavailable |
+| `504 Gateway Timeout` | `section_questions_generation_timeout` or `section_draft_generation_timeout` | Generation exceeded the configured timeout |
