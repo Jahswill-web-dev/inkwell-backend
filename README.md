@@ -228,6 +228,24 @@ uv run python -m pytest app/tests/integration/test_openrouter_smoke.py
 To roll back from OpenRouter to Vertex, restore valid Google credentials, set
 `AI_PROVIDER=vertex`, and restart the API.
 
+## Deploying to Render
+
+The repository includes a `render.yaml` Blueprint for a free Render web service and managed
+PostgreSQL database. It installs the locked dependencies with uv, applies Alembic migrations, and
+starts Uvicorn on Render's assigned port.
+
+1. Push this repository to GitHub, GitLab, or Bitbucket.
+2. In Render, create a new Blueprint and select the repository.
+3. Set `CORS_ORIGINS` to a JSON list containing the deployed frontend origin, for example
+   `["https://app.example.com"]`.
+4. Set `OPENROUTER_API_KEY` to a newly generated OpenRouter key.
+5. Apply the Blueprint and wait for `/ready` to pass its health check.
+
+Render generates `JWT_SECRET_KEY` and wires `DATABASE_URL` to the managed database automatically.
+The free tier does not support a separate pre-deploy command, so the start command applies database
+migrations before launching the API. If the web service is upgraded to a paid plan, move
+`uv run alembic upgrade head` to `preDeployCommand` and leave only Uvicorn in `startCommand`.
+
 ## Code Quality
 
 ```powershell

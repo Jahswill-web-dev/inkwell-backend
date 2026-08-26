@@ -31,6 +31,17 @@ def test_rejects_unsupported_database_urls(database_url: str) -> None:
         valid_settings(database_url=database_url)
 
 
+def test_normalizes_render_postgres_database_url() -> None:
+    settings = valid_settings(
+        database_url="postgresql://render_user:secret@internal-host:5432/inkwell"
+    )
+
+    assert (
+        settings.database_url
+        == "postgresql+psycopg://render_user:secret@internal-host:5432/inkwell"
+    )
+
+
 def test_rejects_placeholder_secret_in_production() -> None:
     with pytest.raises(ValidationError, match="non-development JWT secret"):
         valid_settings(

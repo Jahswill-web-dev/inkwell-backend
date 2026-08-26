@@ -76,6 +76,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "Database URL must be valid and use the postgresql+psycopg async driver"
             ) from exc
+        # Render's managed Postgres connection string uses the generic
+        # ``postgresql://`` scheme. Select psycopg explicitly so SQLAlchemy
+        # creates the async engine expected by the application.
+        if url.drivername == "postgresql":
+            return url.set(drivername="postgresql+psycopg").render_as_string(
+                hide_password=False
+            )
         if url.drivername != "postgresql+psycopg":
             raise ValueError("Database URL must use the postgresql+psycopg async driver")
         return value
