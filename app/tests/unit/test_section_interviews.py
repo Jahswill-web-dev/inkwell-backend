@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from google.genai import types
+from google.genai import _transformers, types
 from pydantic import ValidationError
 
 from app.prompts.section_interview import build_draft_prompt, build_questions_prompt
@@ -62,7 +62,9 @@ def test_question_answer_and_block_schemas() -> None:
         {
             "blocks": [
                 {"type": "paragraph", "text": "Opening."},
+                {"type": "subheading", "text": "Next step"},
                 {"type": "bulleted_list", "items": ["First", "Second"]},
+                {"type": "numbered_list", "items": ["First", "Second"]},
             ]
         }
     )
@@ -79,6 +81,32 @@ def test_question_answer_and_block_schemas() -> None:
         )
     with pytest.raises(ValidationError):
         GeneratedSectionDraft.model_validate({"blocks": [{"type": "quote", "text": "No"}]})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"blocks": []},
+        {"blocks": [{"type": "paragraph", "items": ["Wrong field"]}]},
+        {"blocks": [{"type": "subheading", "text": "Heading", "items": ["Extra"]}]},
+        {"blocks": [{"type": "bulleted_list", "text": "Wrong field"}]},
+        {"blocks": [{"type": "numbered_list", "items": []}]},
+    ],
+)
+def test_generated_section_draft_rejects_malformed_blocks(payload: object) -> None:
+    with pytest.raises(ValidationError):
+        GeneratedSectionDraft.model_validate(payload)
+
+
+def test_generated_section_draft_schema_is_accepted_by_vertex_transformer() -> None:
+    schema = _transformers.t_schema(None, GeneratedSectionDraft)
+
+    assert schema is not None
+    assert schema.properties is not None
+    blocks = schema.properties["blocks"]
+    assert blocks.items is not None
+    assert blocks.items.any_of is not None
+    assert len(blocks.items.any_of) == 3
 
 
 @pytest.mark.parametrize(

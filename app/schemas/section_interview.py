@@ -115,10 +115,7 @@ class ListBlock(BaseModel):
     items: Annotated[list[NonEmptyText], Field(min_length=1)]
 
 
-SectionContentBlock = Annotated[
-    ParagraphBlock | SubheadingBlock | ListBlock,
-    Field(discriminator="type"),
-]
+SectionContentBlock = ParagraphBlock | SubheadingBlock | ListBlock
 
 
 class GeneratedSectionDraft(BaseModel):
