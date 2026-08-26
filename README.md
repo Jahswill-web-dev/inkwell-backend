@@ -314,6 +314,7 @@ allows `http://localhost:3000`.
 | `POST` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Idempotently create an article draft |
 | `PATCH` | `/api/v1/articles/{article_id}/draft` | Bearer token | `200 OK` | Replace a draft's ordered sections |
 | `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points` | Bearer token | `200 OK` | Generate transient talking points for a draft section |
+| `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/generate` | Bearer token | `200 OK` | Generate a transient complete section draft |
 | `POST` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews` | Bearer token | `200 OK` | Generate and persist section interview questions |
 | `GET` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/latest` | Bearer token | `200 OK` | Retrieve the latest section interview |
 | `GET` | `/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews/{interview_id}` | Bearer token | `200 OK` | Retrieve a specific section interview |
@@ -1125,6 +1126,63 @@ Possible draft endpoint responses:
 | `502 Bad Gateway` | `talking_points_generation_failed` | The provider returned invalid talking-point output |
 | `503 Service Unavailable` | `talking_points_generation_unavailable` | Provider configuration, credentials, quota, or service is unavailable |
 | `504 Gateway Timeout` | `talking_points_generation_timeout` | Talking-point generation exceeded the configured timeout |
+
+#### POST `/api/v1/articles/{article_id}/draft/sections/{section_id}/generate`
+
+Generates a complete proposed replacement for one draft section. The API builds the generation
+context from the saved article, brief, current outline, selected section, and surrounding draft
+sections. Existing selected-section prose is treated as source material to improve and incorporate,
+not as text to append to blindly.
+
+The request body is optional. When present, `instruction` must be nonblank after trimming and can
+contain up to 1,000 characters:
+
+```json
+{
+  "instruction": "Emphasize practical steps and keep the tone conversational"
+}
+```
+
+A successful response contains the selected draft section ID and structured content blocks:
+
+```json
+{
+  "section_id": "20000000-0000-4000-8000-000000000000",
+  "blocks": [
+    {
+      "type": "paragraph",
+      "text": "A reliable publishing process starts by making ownership visible."
+    },
+    {
+      "type": "subheading",
+      "text": "Define the handoff"
+    },
+    {
+      "type": "numbered_list",
+      "items": [
+        "Assign one owner to each stage.",
+        "Record the completion criteria.",
+        "Set a deadline for the next handoff."
+      ]
+    }
+  ]
+}
+```
+
+The generated proposal is transient: it does not change the Lexical editor, create an interview,
+or persist generation history. The frontend should preview the blocks, convert accepted blocks to
+Lexical nodes, and save them with `PATCH /api/v1/articles/{article_id}/draft`. Paragraph,
+subheading, bulleted-list, and numbered-list blocks use the same payloads documented under section
+interviews.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `article_not_found`, `draft_not_found`, `brief_not_found`, or `draft_section_not_found` | Required owned context does not exist |
+| `422 Unprocessable Entity` | `validation_error` or `section_draft_generation_blocked` | Input validation failed or the provider rejected the content |
+| `502 Bad Gateway` | `section_draft_generation_failed` | The provider returned invalid structured output |
+| `503 Service Unavailable` | `section_draft_generation_unavailable` | Generation is not configured or the provider is unavailable |
+| `504 Gateway Timeout` | `section_draft_generation_timeout` | Generation exceeded the configured timeout |
 
 ### Section interviews
 

@@ -126,6 +126,7 @@ async def test_all_openrouter_adapters_validate_outputs_and_send_required_contro
                 }
             ),
             completion({"blocks": [{"type": "paragraph", "text": "A complete section."}]}),
+            completion({"blocks": [{"type": "paragraph", "text": "A direct section."}]}),
         ],
     )
     try:
@@ -159,6 +160,9 @@ async def test_all_openrouter_adapters_validate_outputs_and_send_required_contro
             {"selected_section": {"goal": "Explain"}},
             [{"question": "What happened?", "answer": "Something useful."}],
         )
+        direct_draft = await interview_generator.generate_direct_draft(
+            {"selected_section": {"goal": "Explain"}}, "Keep it practical"
+        )
     finally:
         await client.close()
 
@@ -167,10 +171,11 @@ async def test_all_openrouter_adapters_validate_outputs_and_send_required_contro
     assert isinstance(points.talking_points, GeneratedTalkingPoints)
     assert isinstance(questions.questions, GeneratedSectionQuestions)
     assert isinstance(draft.draft, GeneratedSectionDraft)
+    assert isinstance(direct_draft.draft, GeneratedSectionDraft)
     assert brief.model_id == "resolved-model"
     assert brief.input_token_count == 12
     assert brief.output_token_count == 8
-    assert len(queue.requests) == 5
+    assert len(queue.requests) == 6
 
     first_request = queue.requests[0]
     assert str(first_request.url) == "https://openrouter.ai/api/v1/chat/completions"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -10,6 +11,7 @@ from app.prompts.section_interview import build_draft_prompt, build_questions_pr
 from app.schemas.section_interview import (
     GeneratedSectionDraft,
     GeneratedSectionQuestions,
+    ParagraphBlock,
     SectionAnswersUpdate,
     SectionQuestion,
 )
@@ -174,6 +176,28 @@ def test_provider_parses_both_structured_responses() -> None:
             ),
             GeneratedSectionQuestions,
         )
+
+
+async def test_vertex_provider_generates_direct_draft_with_structured_schema() -> None:
+    response = types.GenerateContentResponse.model_construct(
+        candidates=[types.Candidate(finish_reason=types.FinishReason.STOP)],
+        parsed={"blocks": [{"type": "paragraph", "text": "A direct section."}]},
+    )
+    generator = generator_without_client()
+    generate = AsyncMock(return_value=response)
+    generator._generate = generate  # type: ignore[method-assign]
+
+    result = await generator.generate_direct_draft(
+        {"selected_section": {"goal": "Explain"}}, "Keep it concise"
+    )
+
+    block = result.draft.blocks[0]
+    assert isinstance(block, ParagraphBlock)
+    assert block.text == "A direct section."
+    call = generate.await_args
+    assert call is not None
+    assert call.kwargs["schema"] is GeneratedSectionDraft
+    assert "Keep it concise" in call.kwargs["contents"]
 
     with pytest.raises(BriefProviderResponseError):
         generator._parse(

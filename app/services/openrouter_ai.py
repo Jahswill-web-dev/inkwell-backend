@@ -15,6 +15,10 @@ from app.prompts.brief import SYSTEM_INSTRUCTION as BRIEF_SYSTEM_INSTRUCTION
 from app.prompts.brief import build_brief_prompt
 from app.prompts.outline import SYSTEM_INSTRUCTION as OUTLINE_SYSTEM_INSTRUCTION
 from app.prompts.outline import build_outline_prompt
+from app.prompts.section_draft import (
+    SYSTEM_INSTRUCTION as DIRECT_DRAFT_SYSTEM_INSTRUCTION,
+)
+from app.prompts.section_draft import build_section_draft_prompt
 from app.prompts.section_interview import (
     DRAFT_SYSTEM_INSTRUCTION,
     QUESTIONS_SYSTEM_INSTRUCTION,
@@ -291,6 +295,21 @@ class OpenRouterSectionInterviewGenerator:
         result = await self.client.generate(
             system_instruction=DRAFT_SYSTEM_INSTRUCTION,
             user_prompt=build_draft_prompt(context, questions_and_answers),
+            schema=GeneratedSectionDraft,
+        )
+        return SectionDraftResult(
+            draft=result.content,
+            model_id=result.model_id,
+            input_token_count=result.input_token_count,
+            output_token_count=result.output_token_count,
+        )
+
+    async def generate_direct_draft(
+        self, context: dict[str, Any], instruction: str | None
+    ) -> SectionDraftResult:
+        result = await self.client.generate(
+            system_instruction=DIRECT_DRAFT_SYSTEM_INSTRUCTION,
+            user_prompt=build_section_draft_prompt(context, instruction),
             schema=GeneratedSectionDraft,
         )
         return SectionDraftResult(

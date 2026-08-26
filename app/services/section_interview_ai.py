@@ -11,6 +11,10 @@ from google.genai import errors, types
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.prompts.section_draft import (
+    SYSTEM_INSTRUCTION as DIRECT_DRAFT_SYSTEM_INSTRUCTION,
+)
+from app.prompts.section_draft import build_section_draft_prompt
 from app.prompts.section_interview import (
     DRAFT_SYSTEM_INSTRUCTION,
     QUESTIONS_SYSTEM_INSTRUCTION,
@@ -53,6 +57,10 @@ class SectionInterviewGenerator(Protocol):
         self, context: dict[str, Any], questions_and_answers: list[dict[str, Any]]
     ) -> SectionDraftResult: ...
 
+    async def generate_direct_draft(
+        self, context: dict[str, Any], instruction: str | None
+    ) -> SectionDraftResult: ...
+
 
 class VertexGeminiSectionInterviewGenerator:
     def __init__(self, settings: Settings) -> None:
@@ -88,6 +96,21 @@ class VertexGeminiSectionInterviewGenerator:
         response = await self._generate(
             contents=build_draft_prompt(context, questions_and_answers),
             system_instruction=DRAFT_SYSTEM_INSTRUCTION,
+            schema=GeneratedSectionDraft,
+        )
+        return SectionDraftResult(
+            draft=self._parse(response, GeneratedSectionDraft),
+            model_id=self.model_id,
+            input_token_count=_input_tokens(response),
+            output_token_count=_output_tokens(response),
+        )
+
+    async def generate_direct_draft(
+        self, context: dict[str, Any], instruction: str | None
+    ) -> SectionDraftResult:
+        response = await self._generate(
+            contents=build_section_draft_prompt(context, instruction),
+            system_instruction=DIRECT_DRAFT_SYSTEM_INSTRUCTION,
             schema=GeneratedSectionDraft,
         )
         return SectionDraftResult(

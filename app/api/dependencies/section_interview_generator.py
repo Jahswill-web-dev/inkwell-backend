@@ -31,3 +31,6 @@ CurrentSectionQuestionsGenerator = Annotated[
 CurrentSectionDraftGenerator = Annotated[
     SectionInterviewGenerator, Depends(get_section_draft_generator)
 ]
+CurrentDirectSectionDraftGenerator = Annotated[
+    SectionInterviewGenerator, Depends(get_section_draft_generator)
+]

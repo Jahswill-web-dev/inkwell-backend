@@ -57,6 +57,8 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
     assert "/api/v1/articles/{article_id}/outline" in paths
     assert "/api/v1/articles/{article_id}/draft" in paths
     assert "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points" in paths
+    direct_draft = "/api/v1/articles/{article_id}/draft/sections/{section_id}/generate"
+    assert direct_draft in paths
     interview_base = "/api/v1/articles/{article_id}/draft/sections/{section_id}/interviews"
     assert interview_base in paths
     assert f"{interview_base}/latest" in paths
@@ -68,8 +70,9 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
         "/api/v1/articles/{article_id}",
         "/api/v1/articles/{article_id}/brief",
         "/api/v1/articles/{article_id}/outline",
-        "/api/v1/articles/{article_id}/draft",
-        "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points",
+            "/api/v1/articles/{article_id}/draft",
+            "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points",
+            direct_draft,
         interview_base,
         f"{interview_base}/latest",
         f"{interview_base}/{{interview_id}}",

@@ -147,6 +147,8 @@ class FakeSectionInterviewGenerator:
     def __init__(self) -> None:
         self.question_calls: list[tuple[dict[str, object], str | None]] = []
         self.draft_calls: list[tuple[dict[str, object], list[dict[str, object]]]] = []
+        self.direct_draft_calls: list[tuple[dict[str, object], str | None]] = []
+        self.direct_draft_error: Exception | None = None
 
     async def generate_questions(
         self, context: dict[str, object], instruction: str | None
@@ -185,6 +187,26 @@ class FakeSectionInterviewGenerator:
             model_id="fake-gemini",
             input_token_count=80,
             output_token_count=60,
+        )
+
+    async def generate_direct_draft(
+        self, context: dict[str, object], instruction: str | None
+    ) -> SectionDraftResult:
+        self.direct_draft_calls.append((context, instruction))
+        if self.direct_draft_error is not None:
+            raise self.direct_draft_error
+        return SectionDraftResult(
+            draft=GeneratedSectionDraft.model_validate(
+                {
+                    "blocks": [
+                        {"type": "paragraph", "text": "A polished direct section."},
+                        {"type": "bulleted_list", "items": ["First step", "Second step"]},
+                    ]
+                }
+            ),
+            model_id="fake-gemini",
+            input_token_count=90,
+            output_token_count=70,
         )
 
 
@@ -230,6 +252,16 @@ async def article_outline_count(settings: Settings) -> int:
     try:
         async with factory() as session:
             return (await session.scalar(select(func.count()).select_from(ArticleOutline))) or 0
+    finally:
+        await engine.dispose()
+
+
+async def section_interview_count(settings: Settings) -> int:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session:
+            return (await session.scalar(select(func.count()).select_from(SectionInterview))) or 0
     finally:
         await engine.dispose()
 
@@ -1351,6 +1383,178 @@ def test_talking_points_maps_generation_errors(
         )
     finally:
         application.state.talking_points_generator = original_generator
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == code
+
+
+def test_generate_direct_section_draft_uses_full_context_without_mutating_state(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = article_context
+    token, _user = register(client, "direct_draft")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+    draft["sections"][0]["editor_state"] = json.dumps(
+        {
+            "root": {
+                "type": "root",
+                "version": 1,
+                "children": [
+                    {
+                        "type": "paragraph",
+                        "children": [{"type": "text", "text": "Existing section prose."}],
+                    }
+                ],
+            }
+        }
+    )
+    original = client.patch(
+        draft_path,
+        json={"sections": draft["sections"]},
+        headers=headers(token),
+    ).json()
+    section_id = original["sections"][0]["id"]
+    endpoint = f"{draft_path}/sections/{section_id}/generate"
+
+    response = client.post(
+        endpoint,
+        json={"instruction": "  Keep it conversational  "},
+        headers=headers(token),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "section_id": section_id,
+        "blocks": [
+            {"type": "paragraph", "text": "A polished direct section."},
+            {"type": "bulleted_list", "items": ["First step", "Second step"]},
+        ],
+    }
+    assert client.get(draft_path, headers=headers(token)).json() == original
+    assert asyncio.run(section_interview_count(settings)) == 0
+
+    application = cast(FastAPI, client.app)
+    generator = cast(FakeSectionInterviewGenerator, application.state.section_interview_generator)
+    context, instruction = generator.direct_draft_calls[-1]
+    assert instruction == "Keep it conversational"
+    assert cast(dict[str, object], context["article"])["working_title"] == article["working_title"]
+    assert cast(dict[str, object], context["selected_section"])["editor_text"] == (
+        "Existing section prose."
+    )
+    assert len(cast(list[dict[str, object]], context["other_sections"])) == 2
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_status"),
+    [
+        ({}, 200),
+        ({"instruction": ""}, 422),
+        ({"instruction": "x" * 1001}, 422),
+        ({"unexpected": True}, 422),
+    ],
+)
+def test_direct_section_draft_request_validation(
+    article_context: tuple[TestClient, Settings],
+    payload: dict[str, object],
+    expected_status: int,
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, f"direct_valid_{len(str(payload))}")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+
+    response = client.post(
+        f"{draft_path}/sections/{draft['sections'][0]['id']}/generate",
+        json=payload,
+        headers=headers(token),
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 422:
+        assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_direct_section_draft_handles_ownership_resources_and_deleted_outline(
+    article_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = article_context
+    owner_token, _owner = register(client, "direct_owner")
+    other_token, _other = register(client, "direct_other")
+    article = create_article(client, owner_token)
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    before_draft = client.post(
+        f"{draft_path}/sections/{uuid4()}/generate", headers=headers(owner_token)
+    )
+    assert before_draft.status_code == 404
+    assert before_draft.json()["error"]["code"] == "draft_not_found"
+
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(owner_token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(owner_token))
+    draft = client.post(draft_path, headers=headers(owner_token)).json()
+    section_id = draft["sections"][0]["id"]
+    endpoint = f"{draft_path}/sections/{section_id}/generate"
+
+    assert client.post(endpoint).status_code == 401
+    hidden = client.post(endpoint, headers=headers(other_token))
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "article_not_found"
+    missing = client.post(
+        f"{draft_path}/sections/{uuid4()}/generate", headers=headers(owner_token)
+    )
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "draft_section_not_found"
+
+    assert (
+        client.delete(
+            f"/api/v1/articles/{article['id']}/outline", headers=headers(owner_token)
+        ).status_code
+        == 204
+    )
+    assert client.post(endpoint, headers=headers(owner_token)).status_code == 200
+
+    asyncio.run(delete_article_brief(settings, UUID(cast(str, article["id"]))))
+    without_brief = client.post(endpoint, headers=headers(owner_token))
+    assert without_brief.status_code == 404
+    assert without_brief.json()["error"]["code"] == "brief_not_found"
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code", "code"),
+    [
+        (BriefProviderTimeoutError(), 504, "section_draft_generation_timeout"),
+        (BriefProviderBlockedError(), 422, "section_draft_generation_blocked"),
+        (BriefProviderResponseError(), 502, "section_draft_generation_failed"),
+        (BriefProviderUnavailableError(), 503, "section_draft_generation_unavailable"),
+    ],
+)
+def test_direct_section_draft_maps_generation_errors(
+    article_context: tuple[TestClient, Settings],
+    error: Exception,
+    status_code: int,
+    code: str,
+) -> None:
+    client, _settings = article_context
+    token, _user = register(client, f"direct_fail_{status_code}")
+    article = create_article(client, token)
+    client.post(f"/api/v1/articles/{article['id']}/brief", headers=headers(token))
+    client.post(f"/api/v1/articles/{article['id']}/outline", headers=headers(token))
+    draft_path = f"/api/v1/articles/{article['id']}/draft"
+    draft = client.post(draft_path, headers=headers(token)).json()
+    application = cast(FastAPI, client.app)
+    generator = cast(FakeSectionInterviewGenerator, application.state.section_interview_generator)
+    generator.direct_draft_error = error
+
+    response = client.post(
+        f"{draft_path}/sections/{draft['sections'][0]['id']}/generate",
+        headers=headers(token),
+    )
 
     assert response.status_code == status_code
     assert response.json()["error"]["code"] == code
