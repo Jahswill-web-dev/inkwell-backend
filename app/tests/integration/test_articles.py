@@ -21,6 +21,7 @@ from app.db.models.article_outline import ArticleOutline
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.section_interview import SectionInterview
 from app.db.models.user import User
+from app.db.models.workspace import Workspace
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.schemas.brief import GeneratedBrief
@@ -221,6 +222,7 @@ async def clear_database(settings: Settings) -> None:
             await session.execute(delete(ArticleBrief))
             await session.execute(delete(Article))
             await session.execute(delete(LoginRateLimit))
+            await session.execute(delete(Workspace))
             await session.execute(delete(User))
     finally:
         await engine.dispose()
@@ -1505,9 +1507,7 @@ def test_direct_section_draft_handles_ownership_resources_and_deleted_outline(
     hidden = client.post(endpoint, headers=headers(other_token))
     assert hidden.status_code == 404
     assert hidden.json()["error"]["code"] == "article_not_found"
-    missing = client.post(
-        f"{draft_path}/sections/{uuid4()}/generate", headers=headers(owner_token)
-    )
+    missing = client.post(f"{draft_path}/sections/{uuid4()}/generate", headers=headers(owner_token))
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "draft_section_not_found"
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Self
 from uuid import UUID
@@ -11,6 +11,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from app.schemas.client import ClientSummary
 
 TargetAudienceItem = Annotated[
     str,
@@ -34,6 +36,37 @@ class ArticleGoal(StrEnum):
     ENTERTAIN_WITH_A_COMPELLING_STORY = "entertain_with_a_compelling_story"
 
 
+class ArticleStatus(StrEnum):
+    SETUP = "setup"
+    WAITING_FOR_CLIENT = "waiting_for_client"
+    INTERVIEW_IN_PROGRESS = "interview_in_progress"
+    READY_TO_DRAFT = "ready_to_draft"
+    DRAFTING = "drafting"
+    IN_REVIEW = "in_review"
+    READY_TO_PUBLISH = "ready_to_publish"
+    PUBLISHED = "published"
+
+
+class ContentType(StrEnum):
+    BLOG_POST = "blog_post"
+    THOUGHT_LEADERSHIP = "thought_leadership"
+    CASE_STUDY = "case_study"
+    GUIDE = "guide"
+    LANDING_PAGE = "landing_page"
+
+
+class TargetLength(StrEnum):
+    SHORT = "short"
+    STANDARD = "standard"
+    LONG = "long"
+
+
+class InterviewMethod(StrEnum):
+    CLIENT = "client"
+    SELF = "self"
+    NOTES = "notes"
+
+
 class ArticleFields(BaseModel):
     notes: str = Field(min_length=1, max_length=20_000)
     working_title: str = Field(min_length=1, max_length=200)
@@ -52,7 +85,33 @@ class ArticleFields(BaseModel):
 
 
 class ArticleCreate(ArticleFields):
-    pass
+    client_id: UUID | None = None
+    assignee_id: UUID | None = None
+    content_type: ContentType = ContentType.BLOG_POST
+    due_date: date | None = None
+    target_length: TargetLength = TargetLength.STANDARD
+    interview_method: InterviewMethod = InterviewMethod.NOTES
+    interviewee_name: str = Field(default="", max_length=120)
+    interview_instructions: str = Field(default="", max_length=1_000)
+    main_angle: str = Field(default="", max_length=1_000)
+    key_message: str = Field(default="", max_length=1_000)
+    call_to_action: str = Field(default="", max_length=500)
+    tone: str = Field(default="", max_length=500)
+    seo_keyword: str = Field(default="", max_length=200)
+
+    @field_validator(
+        "interviewee_name",
+        "interview_instructions",
+        "main_angle",
+        "key_message",
+        "call_to_action",
+        "tone",
+        "seo_keyword",
+        mode="before",
+    )
+    @classmethod
+    def strip_workflow_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class ArticleUpdate(BaseModel):
@@ -60,8 +119,35 @@ class ArticleUpdate(BaseModel):
     working_title: str | None = Field(default=None, min_length=1, max_length=200)
     target_audience: TargetAudienceList | None = None
     article_goal: ArticleGoal | None = None
+    client_id: UUID | None = None
+    assignee_id: UUID | None = None
+    status: ArticleStatus | None = None
+    content_type: ContentType | None = None
+    due_date: date | None = None
+    target_length: TargetLength | None = None
+    interview_method: InterviewMethod | None = None
+    interviewee_name: str | None = Field(default=None, max_length=120)
+    interview_instructions: str | None = Field(default=None, max_length=1_000)
+    main_angle: str | None = Field(default=None, max_length=1_000)
+    key_message: str | None = Field(default=None, max_length=1_000)
+    call_to_action: str | None = Field(default=None, max_length=500)
+    tone: str | None = Field(default=None, max_length=500)
+    seo_keyword: str | None = Field(default=None, max_length=200)
+    draft_readiness: bool | None = None
+    published_at: datetime | None = None
 
-    @field_validator("notes", "working_title", mode="before")
+    @field_validator(
+        "notes",
+        "working_title",
+        "interviewee_name",
+        "interview_instructions",
+        "main_angle",
+        "key_message",
+        "call_to_action",
+        "tone",
+        "seo_keyword",
+        mode="before",
+    )
     @classmethod
     def strip_text(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
@@ -72,12 +158,22 @@ class ArticleUpdate(BaseModel):
         return _require_unique_audiences(value) if value is not None else None
 
     @model_validator(mode="after")
-    def require_non_null_field(self) -> Self:
+    def require_valid_fields(self) -> Self:
         if not self.model_fields_set:
             raise ValueError("At least one article field must be provided")
-        if any(getattr(self, field) is None for field in self.model_fields_set):
+        nullable = {"client_id", "assignee_id", "due_date", "published_at"}
+        if any(
+            getattr(self, field) is None for field in self.model_fields_set if field not in nullable
+        ):
             raise ValueError("Article fields cannot be null")
         return self
+
+
+class AssigneeSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    username: str
 
 
 class ArticleResponse(ArticleFields):
@@ -85,6 +181,25 @@ class ArticleResponse(ArticleFields):
 
     id: UUID
     user_id: UUID
+    workspace_id: UUID
+    client_id: UUID | None
+    client: ClientSummary | None
+    assignee_id: UUID | None
+    assignee: AssigneeSummary | None
+    status: ArticleStatus
+    content_type: ContentType
+    due_date: date | None
+    target_length: TargetLength
+    interview_method: InterviewMethod
+    interviewee_name: str
+    interview_instructions: str
+    main_angle: str
+    key_message: str
+    call_to_action: str
+    tone: str
+    seo_keyword: str
+    draft_readiness: bool
+    published_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

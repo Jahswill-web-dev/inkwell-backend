@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_data_collection: Literal["allow", "deny"] = "deny"
     openrouter_allow_fallbacks: bool = True
+        # OpenAI Realtime voice interviews
+    openai_api_key: SecretStr | None = Field(default=None)
+    openai_realtime_model: str = Field(default="gpt-realtime", min_length=1)
+    openai_interview_question_model: str = Field(default="gpt-5.6-luna", min_length=1)
+    openai_realtime_request_timeout_seconds: float = Field(default=20, gt=0)
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
@@ -80,9 +85,7 @@ class Settings(BaseSettings):
         # ``postgresql://`` scheme. Select psycopg explicitly so SQLAlchemy
         # creates the async engine expected by the application.
         if url.drivername == "postgresql":
-            return url.set(drivername="postgresql+psycopg").render_as_string(
-                hide_password=False
-            )
+            return url.set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
         if url.drivername != "postgresql+psycopg":
             raise ValueError("Database URL must use the postgresql+psycopg async driver")
         return value
@@ -92,6 +95,14 @@ class Settings(BaseSettings):
     def normalize_openrouter_api_key(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+    
+    @field_validator("openai_api_key", mode="before")
+    @classmethod
+    def normalize_openai_api_key(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
         return value
 
     @field_validator("openrouter_base_url")

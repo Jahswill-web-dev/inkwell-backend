@@ -47,9 +47,7 @@ async def get_article_outline(
     current_user: CurrentUser,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ArticleOutlineResponse:
-    return await ArticleOutlineService(session).get(
-        article_id=article_id, user_id=current_user.id
-    )
+    return await ArticleOutlineService(session).get(article_id=article_id, user_id=current_user.id)
 
 
 @router.patch("", response_model=ArticleOutlineResponse, responses=ERROR_RESPONSES)

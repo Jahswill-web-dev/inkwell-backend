@@ -14,6 +14,7 @@ from app.core.security import (
     verify_and_update_password,
 )
 from app.db.models.user import User
+from app.db.models.workspace import Workspace, WorkspaceMember
 from app.db.repositories.user import UserRepository
 from app.services.login_rate_limiter import LoginRateLimiter
 
@@ -45,6 +46,18 @@ class AuthService:
         user = User(email=email, username=username, password_hash=password_hash)
         try:
             await self.users.add(user)
+            workspace = Workspace(name=f"{username}'s workspace")
+            self.users.session.add(workspace)
+            await self.users.session.flush()
+            self.users.session.add(
+                WorkspaceMember(
+                    workspace_id=workspace.id,
+                    user_id=user.id,
+                    role="owner",
+                    is_default=True,
+                )
+            )
+            await self.users.session.flush()
         except IntegrityError as exc:
             await self.users.session.rollback()
             constraint_name = _constraint_name(exc)

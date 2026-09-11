@@ -20,6 +20,7 @@ from app.core.security import (
 )
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.user import User
+from app.db.models.workspace import Workspace
 from app.db.repositories.user import UserRepository
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
@@ -35,6 +36,7 @@ async def clear_users(settings: Settings) -> None:
     try:
         async with factory.begin() as session:
             await session.execute(delete(LoginRateLimit))
+            await session.execute(delete(Workspace))
             await session.execute(delete(User))
     finally:
         await engine.dispose()

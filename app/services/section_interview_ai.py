@@ -11,6 +11,12 @@ from google.genai import errors, types
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.prompts.client_interview_questions import (
+    SYSTEM_INSTRUCTION as CLIENT_QUESTIONS_SYSTEM_INSTRUCTION,
+)
+from app.prompts.client_interview_questions import (
+    build_prompt as build_client_questions_prompt,
+)
 from app.prompts.section_draft import (
     SYSTEM_INSTRUCTION as DIRECT_DRAFT_SYSTEM_INSTRUCTION,
 )
@@ -21,6 +27,7 @@ from app.prompts.section_interview import (
     build_draft_prompt,
     build_questions_prompt,
 )
+from app.schemas.client_interview_questions import GeneratedClientInterviewQuestions
 from app.schemas.section_interview import GeneratedSectionDraft, GeneratedSectionQuestions
 from app.services.ai_service import (
     BLOCKED_FINISH_REASONS,
@@ -41,6 +48,14 @@ class SectionQuestionsResult:
 
 
 @dataclass(frozen=True)
+class ClientInterviewQuestionsResult:
+    questions: GeneratedClientInterviewQuestions
+    model_id: str
+    input_token_count: int | None
+    output_token_count: int | None
+
+
+@dataclass(frozen=True)
 class SectionDraftResult:
     draft: GeneratedSectionDraft
     model_id: str
@@ -48,7 +63,13 @@ class SectionDraftResult:
     output_token_count: int | None
 
 
-class SectionInterviewGenerator(Protocol):
+class ClientInterviewQuestionGenerator(Protocol):
+    async def generate_client_questions(
+        self, context: dict[str, Any]
+    ) -> ClientInterviewQuestionsResult: ...
+
+
+class SectionInterviewGenerator(ClientInterviewQuestionGenerator, Protocol):
     async def generate_questions(
         self, context: dict[str, Any], instruction: str | None
     ) -> SectionQuestionsResult: ...
@@ -85,6 +106,21 @@ class VertexGeminiSectionInterviewGenerator:
         )
         return SectionQuestionsResult(
             questions=self._parse(response, GeneratedSectionQuestions),
+            model_id=self.model_id,
+            input_token_count=_input_tokens(response),
+            output_token_count=_output_tokens(response),
+        )
+
+    async def generate_client_questions(
+        self, context: dict[str, Any]
+    ) -> ClientInterviewQuestionsResult:
+        response = await self._generate(
+            contents=build_client_questions_prompt(context),
+            system_instruction=CLIENT_QUESTIONS_SYSTEM_INSTRUCTION,
+            schema=GeneratedClientInterviewQuestions,
+        )
+        return ClientInterviewQuestionsResult(
+            questions=self._parse(response, GeneratedClientInterviewQuestions),
             model_id=self.model_id,
             input_token_count=_input_tokens(response),
             output_token_count=_output_tokens(response),

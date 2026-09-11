@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.auth import CurrentUser
 from app.db.repositories.article import ArticleRepository
+from app.db.repositories.client import ClientRepository
+from app.db.repositories.workspace import WorkspaceRepository
 from app.db.session import get_db_session
 from app.schemas.article import (
     ArticleCreate,
@@ -20,7 +22,11 @@ router = APIRouter(prefix="/articles", tags=["articles"])
 
 
 def _service(session: AsyncSession) -> ArticleService:
-    return ArticleService(ArticleRepository(session))
+    return ArticleService(
+        ArticleRepository(session),
+        ClientRepository(session),
+        WorkspaceRepository(session),
+    )
 
 
 @router.post(

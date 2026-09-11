@@ -13,6 +13,12 @@ from pydantic import BaseModel, ValidationError
 from app.core.config import Settings
 from app.prompts.brief import SYSTEM_INSTRUCTION as BRIEF_SYSTEM_INSTRUCTION
 from app.prompts.brief import build_brief_prompt
+from app.prompts.client_interview_questions import (
+    SYSTEM_INSTRUCTION as CLIENT_QUESTIONS_SYSTEM_INSTRUCTION,
+)
+from app.prompts.client_interview_questions import (
+    build_prompt as build_client_questions_prompt,
+)
 from app.prompts.outline import SYSTEM_INSTRUCTION as OUTLINE_SYSTEM_INSTRUCTION
 from app.prompts.outline import build_outline_prompt
 from app.prompts.section_draft import (
@@ -28,6 +34,7 @@ from app.prompts.section_interview import (
 from app.prompts.talking_points import SYSTEM_INSTRUCTION as TALKING_POINTS_SYSTEM_INSTRUCTION
 from app.prompts.talking_points import build_talking_points_prompt
 from app.schemas.brief import GeneratedBrief
+from app.schemas.client_interview_questions import GeneratedClientInterviewQuestions
 from app.schemas.outline import GeneratedOutline
 from app.schemas.section_interview import GeneratedSectionDraft, GeneratedSectionQuestions
 from app.schemas.talking_points import GeneratedTalkingPoints
@@ -43,7 +50,11 @@ from app.services.ai_service import (
     TalkingPointsGenerationResult,
     TalkingPointsSource,
 )
-from app.services.section_interview_ai import SectionDraftResult, SectionQuestionsResult
+from app.services.section_interview_ai import (
+    ClientInterviewQuestionsResult,
+    SectionDraftResult,
+    SectionQuestionsResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +284,21 @@ class OpenRouterTalkingPointsGenerator:
 class OpenRouterSectionInterviewGenerator:
     def __init__(self, client: OpenRouterJSONClient) -> None:
         self.client = client
+
+    async def generate_client_questions(
+        self, context: dict[str, Any]
+    ) -> ClientInterviewQuestionsResult:
+        result = await self.client.generate(
+            system_instruction=CLIENT_QUESTIONS_SYSTEM_INSTRUCTION,
+            user_prompt=build_client_questions_prompt(context),
+            schema=GeneratedClientInterviewQuestions,
+        )
+        return ClientInterviewQuestionsResult(
+            questions=result.content,
+            model_id=result.model_id,
+            input_token_count=result.input_token_count,
+            output_token_count=result.output_token_count,
+        )
 
     async def generate_questions(
         self, context: dict[str, Any], instruction: str | None

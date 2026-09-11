@@ -24,10 +24,13 @@ class BriefSeoUpdate(BaseModel):
     suggested_titles: Annotated[list[BriefText], Field(min_length=3, max_length=5)] | None = None
     primary_keyword: BriefText | None = None
     secondary_keywords: Annotated[list[BriefText], Field(max_length=8)] | None = None
-    meta_description: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=160),
-    ] | None = None
+    meta_description: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=160),
+        ]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def require_non_null_field(self) -> Self:
@@ -51,10 +54,13 @@ class GeneratedBrief(BaseModel):
 class ArticleBriefUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    summary: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=1200),
-    ] | None = None
+    summary: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=1200),
+        ]
+        | None
+    ) = None
     core_angle: BriefText | None = None
     audience_insights: Annotated[list[BriefText], Field(min_length=1, max_length=6)] | None = None
     tone_and_style: BriefText | None = None

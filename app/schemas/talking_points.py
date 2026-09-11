@@ -11,10 +11,13 @@ TalkingPoint = Annotated[str, StringConstraints(strip_whitespace=True, min_lengt
 class TalkingPointsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    instruction: Annotated[
-        str,
-        StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
-    ] | None = None
+    instruction: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+        ]
+        | None
+    ) = None
 
 
 class GeneratedTalkingPoints(BaseModel):

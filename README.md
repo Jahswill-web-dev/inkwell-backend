@@ -316,6 +316,11 @@ allows `http://localhost:3000`.
 | `POST` | `/api/v1/auth/register` | None | `201 Created` | Create an account and receive an access token |
 | `POST` | `/api/v1/auth/login` | None | `200 OK` | Authenticate by email and receive an access token |
 | `GET` | `/api/v1/auth/me` | Bearer token | `200 OK` | Return the authenticated user |
+| `GET` | `/api/v1/workspaces/current` | Bearer token | `200 OK` | Return the user's default workspace and role |
+| `GET` | `/api/v1/clients` | Bearer token | `200 OK` | List clients in the default workspace |
+| `POST` | `/api/v1/clients` | Bearer token | `201 Created` | Create a reusable workspace client |
+| `GET` | `/api/v1/clients/{client_id}` | Bearer token | `200 OK` | Retrieve a workspace client |
+| `PATCH` | `/api/v1/clients/{client_id}` | Bearer token | `200 OK` | Update a client and its brand profile |
 | `POST` | `/api/v1/articles` | Bearer token | `201 Created` | Create an article intake |
 | `GET` | `/api/v1/articles` | Bearer token | `200 OK` | List the current user's articles |
 | `GET` | `/api/v1/articles/{article_id}` | Bearer token | `200 OK` | Retrieve an owned article |
@@ -742,10 +747,102 @@ Both authentication errors include:
 WWW-Authenticate: Bearer
 ```
 
+### Agency workspaces and clients
+
+Registration atomically creates a personal default workspace and an `owner` membership. Existing
+users receive the same workspace and membership when migration `20260910_0010` is applied.
+Milestones 10-11 expose only the default workspace; workspace switching, invitations, and member
+management are not yet available.
+
+All endpoints in this section require a bearer token. Client and article access is checked through
+workspace membership. A resource in another workspace is returned as `404 Not Found` rather than
+revealing that it exists.
+
+#### GET `/api/v1/workspaces/current`
+
+```json
+{
+  "id": "675bd099-ae1f-4246-b91e-a49b8077f65c",
+  "name": "writer_01's workspace",
+  "role": "owner",
+  "created_at": "2026-09-10T12:00:00Z",
+  "updated_at": "2026-09-10T12:00:00Z"
+}
+```
+
+The role is `owner` or `member`. A missing default workspace returns
+`404 workspace_not_found`.
+
+#### GET and POST `/api/v1/clients`
+
+`GET` accepts `offset` (default `0`) and `limit` (default `100`, maximum `100`). Results
+are sorted by client name and use the standard `items`, `total`, `offset`, and `limit`
+pagination envelope.
+
+`POST` creates a client. Names are trimmed and unique case-insensitively inside one workspace;
+the same name may be used in a different workspace.
+
+```json
+{
+  "name": "Northstar Labs",
+  "website": "https://northstar.example",
+  "industry": "B2B software",
+  "brand_profile": {
+    "default_audience": "Content leaders at growing software companies",
+    "brand_voice": "Direct, credible, and practical",
+    "preferred_terminology": ["customers"],
+    "avoided_terminology": ["users"],
+    "default_calls_to_action": ["Book a strategy call"]
+  }
+}
+```
+
+Successful response - `201 Created`:
+
+```json
+{
+  "id": "8d9dd792-78d8-4c9a-84bb-67d84c78b62a",
+  "workspace_id": "675bd099-ae1f-4246-b91e-a49b8077f65c",
+  "name": "Northstar Labs",
+  "website": "https://northstar.example",
+  "industry": "B2B software",
+  "brand_profile": {
+    "id": "0f11cdfa-d317-4ea4-99eb-3704f7659235",
+    "client_id": "8d9dd792-78d8-4c9a-84bb-67d84c78b62a",
+    "default_audience": "Content leaders at growing software companies",
+    "brand_voice": "Direct, credible, and practical",
+    "preferred_terminology": ["customers"],
+    "avoided_terminology": ["users"],
+    "default_calls_to_action": ["Book a strategy call"],
+    "created_at": "2026-09-10T12:00:00Z",
+    "updated_at": "2026-09-10T12:00:00Z"
+  },
+  "created_at": "2026-09-10T12:00:00Z",
+  "updated_at": "2026-09-10T12:00:00Z"
+}
+```
+
+`website`, `industry`, and `brand_profile` are optional. Websites must be absolute HTTP or
+HTTPS URLs. Terminology and call-to-action lists accept at most 20 unique, nonblank values.
+
+#### GET and PATCH `/api/v1/clients/{client_id}`
+
+`GET` returns the client response above. `PATCH` accepts any non-empty subset of `name`,
+`website`, `industry`, and `brand_profile`. Send `null` for `website`, `industry`, or
+`brand_profile` to clear it. A duplicate normalized name returns `409 client_name_taken`.
+
+| Status | Error code | Meaning |
+| --- | --- | --- |
+| `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
+| `404 Not Found` | `workspace_not_found` or `client_not_found` | The default workspace or client is unavailable |
+| `409 Conflict` | `client_name_taken` | The normalized client name already exists in this workspace |
+| `422 Unprocessable Entity` | `validation_error` | A request or pagination value failed validation |
+
 ### Article intake
 
 Article intake endpoints require a bearer access token. They save the user's notes and planning
-choices used for brief generation. Every read and mutation is scoped to the authenticated user.
+choices used for brief generation. Every read and mutation is scoped to a workspace the
+authenticated user belongs to. Cross-workspace articles return `404 article_not_found`.
 
 The five accepted `article_goal` values map to frontend labels as follows:
 
@@ -765,7 +862,11 @@ Sending a single string instead of an array fails validation.
 
 #### POST `/api/v1/articles`
 
-Creates an article intake. All four fields are required.
+Creates an article. The original four intake fields remain required. The structured agency fields
+are optional for compatibility with older clients; omitted fields receive the defaults shown
+below. `workspace_id`, `status`, `draft_readiness`, and `published_at` cannot be selected at
+creation. The server derives the workspace, starts the article in `setup`, and assigns it to the
+current user unless a workspace member is supplied as `assignee_id`.
 
 ```json
 {
@@ -775,7 +876,19 @@ Creates an article intake. All four fields are required.
     "Independent writers",
     "Small content teams"
   ],
-  "article_goal": "educate_with_practical_guidance"
+  "article_goal": "educate_with_practical_guidance",
+  "client_id": "8d9dd792-78d8-4c9a-84bb-67d84c78b62a",
+  "content_type": "thought_leadership",
+  "due_date": "2026-10-01",
+  "target_length": "long",
+  "interview_method": "client",
+  "interviewee_name": "Avery Chen",
+  "interview_instructions": "Ask for measurable examples",
+  "main_angle": "Expert evidence builds trust",
+  "key_message": "Interview before drafting",
+  "call_to_action": "Book a strategy call",
+  "tone": "Clear and credible",
+  "seo_keyword": "expert-led content"
 }
 ```
 
@@ -785,6 +898,17 @@ Successful response - `201 Created`:
 {
   "id": "be5579e3-24fd-4272-a35f-f74740c3887e",
   "user_id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",
+  "workspace_id": "675bd099-ae1f-4246-b91e-a49b8077f65c",
+  "client_id": "8d9dd792-78d8-4c9a-84bb-67d84c78b62a",
+  "client": {
+    "id": "8d9dd792-78d8-4c9a-84bb-67d84c78b62a",
+    "name": "Northstar Labs"
+  },
+  "assignee_id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",
+  "assignee": {
+    "id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",
+    "username": "writer_01"
+  },
   "notes": "Research notes and an early idea",
   "working_title": "How small teams can publish consistently",
   "target_audience": [
@@ -792,6 +916,20 @@ Successful response - `201 Created`:
     "Small content teams"
   ],
   "article_goal": "educate_with_practical_guidance",
+  "status": "setup",
+  "content_type": "thought_leadership",
+  "due_date": "2026-10-01",
+  "target_length": "long",
+  "interview_method": "client",
+  "interviewee_name": "Avery Chen",
+  "interview_instructions": "Ask for measurable examples",
+  "main_angle": "Expert evidence builds trust",
+  "key_message": "Interview before drafting",
+  "call_to_action": "Book a strategy call",
+  "tone": "Clear and credible",
+  "seo_keyword": "expert-led content",
+  "draft_readiness": false,
+  "published_at": null,
   "created_at": "2026-08-12T12:00:00Z",
   "updated_at": "2026-08-12T12:00:00Z"
 }
@@ -847,14 +985,16 @@ Authorization: Bearer <access_token>
 
 #### GET `/api/v1/articles/{article_id}`
 
-Returns one article owned by the authenticated user. A missing article or an article owned by a
-different user returns `404 Not Found` with the `article_not_found` error code.
+Returns one article in the authenticated user's workspace. A missing or cross-workspace article
+returns `404 Not Found` with the `article_not_found` error code.
 
 #### PATCH `/api/v1/articles/{article_id}`
 
-Updates any non-empty subset of `notes`, `working_title`, `target_audience`, and `article_goal`.
-An empty object or an explicit `null` value fails validation with `422 Unprocessable Entity`.
-When supplied, `target_audience` replaces the complete existing array.
+Updates any non-empty subset of the intake and workflow fields. `client_id`, `assignee_id`,
+`due_date`, and `published_at` may be cleared with `null`; other explicit nulls fail
+validation. Client and assignee IDs must belong to the article's workspace. Publishing requires
+`status: "published"` and a non-null `published_at` in the same or existing state; moving away
+from `published` requires clearing `published_at`.
 
 ```json
 {
@@ -874,7 +1014,24 @@ Possible article endpoint responses:
 | --- | --- | --- |
 | `401 Unauthorized` | `authentication_required` or `invalid_token` | A valid bearer token is required |
 | `404 Not Found` | `article_not_found` | The article is missing or belongs to another user |
-| `422 Unprocessable Entity` | `validation_error` | A body, path, or pagination value failed validation |
+| `422 Unprocessable Entity` | `validation_error` | A body, path, enum, date, or pagination value failed validation |
+| `422 Unprocessable Entity` | `invalid_article_client` | The selected client is outside the article workspace |
+| `422 Unprocessable Entity` | `invalid_article_assignee` | The selected assignee is outside the article workspace |
+| `422 Unprocessable Entity` | `invalid_article_workflow` | Published status and timestamp are inconsistent |
+
+Allowed workflow values:
+
+- `status`: `setup`, `waiting_for_client`, `interview_in_progress`, `ready_to_draft`,
+  `drafting`, `in_review`, `ready_to_publish`, `published`.
+- `content_type`: `blog_post`, `thought_leadership`, `case_study`, `guide`,
+  `landing_page`.
+- `target_length`: `short`, `standard`, `long`.
+- `interview_method`: `client`, `self`, `notes`.
+
+The migration backfills each legacy article into its creator's default workspace and assigns the
+creator while leaving `client_id` null. Secure guest links, cross-browser interview activity,
+whole-article AI interviews, synthesis, and source-aware generation remain scheduled for later
+milestones.
 
 ### Article briefs
 

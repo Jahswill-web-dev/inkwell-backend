@@ -74,6 +74,33 @@ async def read_target_audience(settings: Settings, *, article_id: UUID) -> objec
         await engine.dispose()
 
 
+async def read_agency_backfill(
+    settings: Settings, *, user_id: UUID, article_id: UUID
+) -> dict[str, object]:
+    engine = create_engine(settings)
+    try:
+        async with engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT a.user_id, a.workspace_id, a.assignee_id, a.client_id, "
+                            "wm.role, wm.is_default "
+                            "FROM articles a "
+                            "JOIN workspace_members wm ON wm.workspace_id = a.workspace_id "
+                            "WHERE a.id = :article_id AND wm.user_id = :user_id"
+                        ),
+                        {"article_id": article_id, "user_id": user_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return dict(row)
+    finally:
+        await engine.dispose()
+
+
 async def insert_outline_without_section_ids(
     settings: Settings, *, user_id: UUID, article_id: UUID, outline_id: UUID
 ) -> None:
@@ -154,6 +181,19 @@ def test_migrations_upgrade_downgrade_and_restore(settings: Settings) -> None:
         assert asyncio.run(read_target_audience(test_settings, article_id=article_id)) == [
             "Legacy audience"
         ]
+        agency = asyncio.run(
+            read_agency_backfill(
+                test_settings,
+                user_id=user_id,
+                article_id=article_id,
+            )
+        )
+        assert agency["user_id"] == user_id
+        assert agency["workspace_id"] is not None
+        assert agency["assignee_id"] == user_id
+        assert agency["client_id"] is None
+        assert agency["role"] == "owner"
+        assert agency["is_default"] is True
         command.downgrade(config, "20260812_0004")
         assert (
             asyncio.run(read_target_audience(test_settings, article_id=article_id))

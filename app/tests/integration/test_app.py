@@ -70,17 +70,23 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
         "/api/v1/articles/{article_id}",
         "/api/v1/articles/{article_id}/brief",
         "/api/v1/articles/{article_id}/outline",
-            "/api/v1/articles/{article_id}/draft",
-            "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points",
-            direct_draft,
+        "/api/v1/articles/{article_id}/draft",
+        "/api/v1/articles/{article_id}/draft/sections/{section_id}/talking-points",
+        direct_draft,
         interview_base,
         f"{interview_base}/latest",
         f"{interview_base}/{{interview_id}}",
         f"{interview_base}/{{interview_id}}/answers",
         f"{interview_base}/{{interview_id}}/generate",
+        "/api/v1/articles/{article_id}/invitations",
+        "/api/v1/articles/{article_id}/invitations/{invitation_id}",
+        "/api/v1/interviews/{token}",
         "/api/v1/auth/login",
         "/api/v1/auth/me",
         "/api/v1/auth/register",
+        "/api/v1/clients",
+        "/api/v1/clients/{client_id}",
+        "/api/v1/workspaces/current",
     }
 
     security_schemes = client.get("/openapi.json").json()["components"]["securitySchemes"]
@@ -88,6 +94,9 @@ def test_openapi_contains_health_and_authentication_endpoints(client: TestClient
     assert paths["/api/v1/auth/me"]["get"]["security"] == [{"HTTPBearer": []}]
     assert paths["/api/v1/articles"]["post"]["security"] == [{"HTTPBearer": []}]
     assert paths["/api/v1/articles"]["get"]["security"] == [{"HTTPBearer": []}]
+    assert paths["/api/v1/clients"]["get"]["security"] == [{"HTTPBearer": []}]
+    assert paths["/api/v1/clients"]["post"]["security"] == [{"HTTPBearer": []}]
+    assert paths["/api/v1/workspaces/current"]["get"]["security"] == [{"HTTPBearer": []}]
     assert "security" not in paths["/api/v1/auth/login"]["post"]
     assert "security" not in paths["/api/v1/auth/register"]["post"]
 

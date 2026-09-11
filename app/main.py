@@ -21,6 +21,7 @@ from app.services.ai_service import (
     VertexGeminiOutlineGenerator,
     VertexGeminiTalkingPointsGenerator,
 )
+from app.services.openai_interview_questions import OpenAIClientInterviewQuestionGenerator
 from app.services.openrouter_ai import (
     OpenRouterBriefGenerator,
     OpenRouterJSONClient,
@@ -29,6 +30,7 @@ from app.services.openrouter_ai import (
     OpenRouterTalkingPointsGenerator,
 )
 from app.services.section_interview_ai import (
+    ClientInterviewQuestionGenerator,
     SectionInterviewGenerator,
     VertexGeminiSectionInterviewGenerator,
 )
@@ -50,6 +52,7 @@ def create_app(
     outline_generator: OutlineGenerator | None = None,
     talking_points_generator: TalkingPointsGenerator | None = None,
     section_interview_generator: SectionInterviewGenerator | None = None,
+    client_interview_question_generator: ClientInterviewQuestionGenerator | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -62,10 +65,20 @@ def create_app(
         managed_talking_points_generator: VertexGeminiTalkingPointsGenerator | None = None
         managed_section_interview_generator: VertexGeminiSectionInterviewGenerator | None = None
         managed_openrouter_client: OpenRouterJSONClient | None = None
+        managed_client_question_generator: OpenAIClientInterviewQuestionGenerator | None = None
         resolved_generator = brief_generator
         resolved_outline_generator = outline_generator
         resolved_talking_points_generator = talking_points_generator
         resolved_section_interview_generator = section_interview_generator
+        resolved_client_question_generator = client_interview_question_generator
+        if (
+            resolved_client_question_generator is None
+            and resolved_settings.openai_api_key is not None
+        ):
+            managed_client_question_generator = OpenAIClientInterviewQuestionGenerator(
+                resolved_settings
+            )
+            resolved_client_question_generator = managed_client_question_generator
         if (
             resolved_settings.ai_provider == "vertex"
             and resolved_settings.vertex_project_id is not None
@@ -121,6 +134,7 @@ def create_app(
         application.state.outline_generator = resolved_outline_generator
         application.state.talking_points_generator = resolved_talking_points_generator
         application.state.section_interview_generator = resolved_section_interview_generator
+        application.state.client_interview_question_generator = resolved_client_question_generator
         try:
             yield
         finally:
@@ -134,6 +148,8 @@ def create_app(
                 await managed_section_interview_generator.close()
             if managed_openrouter_client is not None:
                 await managed_openrouter_client.close()
+            if managed_client_question_generator is not None:
+                await managed_client_question_generator.close()
             await engine.dispose()
 
     application = FastAPI(
