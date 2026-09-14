@@ -200,6 +200,7 @@ class InterviewInvitationService:
             if invitation.progress_state == "not_opened":
                 invitation.progress_state = "opened"
             await self.session.flush()
+            await self.session.refresh(invitation, attribute_names=["updated_at"])
 
         return GuestInterviewResponse(
             invitation=self._to_response(invitation),
@@ -256,6 +257,7 @@ class InterviewInvitationService:
 
         invitation.session_data = session_dict
         await self.session.flush()
+        await self.session.refresh(invitation, attribute_names=["updated_at"])
 
         return GuestInterviewResponse(
             invitation=self._to_response(invitation),
