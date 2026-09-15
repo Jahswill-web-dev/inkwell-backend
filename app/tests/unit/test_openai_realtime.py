@@ -49,10 +49,11 @@ def test_build_interview_instructions_uses_invitation_and_question_plan() -> Non
     assert "1. What problem were you trying to solve?" in instructions
     assert "2. What changed after you solved it?" in instructions
     assert "Ask one question at a time" in instructions
-    assert (
-        "Begin the interview as soon as the voice session starts"
-        in instructions
-    )
+    assert "Open with a brief orientation before any interview question" in instructions
+    assert "help Morgan Lee shape the article “How teams use customer research”" in instructions
+    assert "ask whether the participant is ready to begin" in instructions
+    assert "Do not ask the first\n  planned question until they clearly confirm" in instructions
+    assert "do\n  not treat silence as consent to begin" in instructions
     assert "end_interview with\n  reason participant_finished" in instructions
     assert "end_interview with reason questions_complete" in instructions
 
