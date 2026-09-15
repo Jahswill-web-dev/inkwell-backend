@@ -7,7 +7,7 @@ from app.schemas.interview_invitation import (
     GuestSessionData,
     InterviewInvitationResponse,
 )
-from app.services.openai_realtime import build_interview_instructions
+from app.services.openai_realtime import END_INTERVIEW_TOOL, build_interview_instructions
 
 
 def test_build_interview_instructions_uses_invitation_and_question_plan() -> None:
@@ -50,6 +50,16 @@ def test_build_interview_instructions_uses_invitation_and_question_plan() -> Non
     assert "2. What changed after you solved it?" in instructions
     assert "Ask one question at a time" in instructions
     assert (
-        "Do not begin speaking until the application explicitly asks you to start"
+        "Begin the interview as soon as the voice session starts"
         in instructions
     )
+    assert "end_interview with\n  reason participant_finished" in instructions
+    assert "end_interview with reason questions_complete" in instructions
+
+
+def test_end_interview_tool_accepts_only_completion_reasons() -> None:
+    assert END_INTERVIEW_TOOL["name"] == "end_interview"
+    assert END_INTERVIEW_TOOL["parameters"]["properties"]["reason"]["enum"] == [
+        "participant_finished",
+        "questions_complete",
+    ]
