@@ -6,6 +6,7 @@ from app.db.models.article_draft import ArticleDraft
 from app.db.models.article_outline import ArticleOutline
 from app.db.models.client import Client, ClientBrandProfile
 from app.db.models.interview_invitation import InterviewInvitation
+from app.db.models.interview_transcript import InterviewTranscript
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.section_interview import SectionInterview
 from app.db.models.user import User
@@ -19,6 +20,7 @@ __all__ = [
     "Client",
     "ClientBrandProfile",
     "InterviewInvitation",
+    "InterviewTranscript",
     "LoginRateLimit",
     "SectionInterview",
     "User",

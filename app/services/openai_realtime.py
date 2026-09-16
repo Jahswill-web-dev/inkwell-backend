@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from openai import AsyncOpenAI
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.schemas.interview_invitation import GuestInterviewResponse
 
-END_INTERVIEW_TOOL = {
+END_INTERVIEW_TOOL: dict[str, Any] = {
     "type": "function",
     "name": "end_interview",
     "description": (
@@ -103,12 +105,20 @@ class OpenAIRealtimeService:
         try:
             response = await self._client.realtime.calls.create(
                 sdp=sdp,
-                session={
-                    "type": "realtime",
-                    "model": self._model,
-                    "instructions": instructions,
-                    "tools": [END_INTERVIEW_TOOL],
-                },
+                session=cast(
+                    Any,
+                    {
+                        "type": "realtime",
+                        "model": self._model,
+                        "instructions": instructions,
+                        "audio": {
+                            "input": {
+                                "transcription": {"model": "gpt-4o-mini-transcribe"},
+                            },
+                        },
+                        "tools": [END_INTERVIEW_TOOL],
+                    },
+                ),
             )
         except Exception as exc:
             raise AppError(

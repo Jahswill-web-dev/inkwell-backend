@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_data_collection: Literal["allow", "deny"] = "deny"
     openrouter_allow_fallbacks: bool = True
-        # OpenAI Realtime voice interviews
+    # OpenAI Realtime voice interviews
     openai_api_key: SecretStr | None = Field(default=None)
     openai_realtime_model: str = Field(default="gpt-realtime", min_length=1)
     openai_interview_question_model: str = Field(default="gpt-5.6-luna", min_length=1)
@@ -96,7 +96,7 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
-    
+
     @field_validator("openai_api_key", mode="before")
     @classmethod
     def normalize_openai_api_key(cls, value: object) -> object:

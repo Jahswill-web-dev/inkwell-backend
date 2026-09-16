@@ -308,7 +308,7 @@ class InterviewInvitationService:
             raise AppError(
                 status_code=502,
                 code="interview_question_generation_failed",
-                message="The generated interview questions were invalid",
+                message=str(exc) or "The generated interview questions were invalid",
             ) from exc
         except BriefProviderUnavailableError as exc:
             raise AppError(

@@ -17,16 +17,14 @@ class GeneratedClientInterviewQuestion(BaseModel):
 
     @field_validator("question")
     @classmethod
-    def require_single_question(cls, value: str) -> str:
-        if "\n" in value or "\r" in value or not value.endswith("?"):
-            raise ValueError("Question must be one sentence ending in a question mark")
+    def require_single_line(cls, value: str) -> str:
+        if "\n" in value or "\r" in value:
+            raise ValueError("Question must not contain line breaks")
         return value
 
 
 class GeneratedClientInterviewQuestions(BaseModel):
-    questions: Annotated[
-        list[GeneratedClientInterviewQuestion], Field(min_length=5, max_length=7)
-    ]
+    questions: Annotated[list[GeneratedClientInterviewQuestion], Field(min_length=5, max_length=7)]
 
     @field_validator("questions")
     @classmethod

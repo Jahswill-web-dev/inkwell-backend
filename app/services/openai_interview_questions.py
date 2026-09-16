@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.prompts.client_interview_questions import SYSTEM_INSTRUCTION, build_prompt
@@ -46,6 +47,11 @@ class OpenAIClientInterviewQuestionGenerator:
             if exc.status_code in {400, 422}:
                 raise BriefProviderBlockedError from exc
             raise BriefProviderUnavailableError from exc
+        except ValidationError as exc:
+            raise BriefProviderResponseError(
+                "The AI returned an invalid interview-question format. "
+                "A question cannot contain a line break."
+            ) from exc
 
         parsed = response.output_parsed
         if not isinstance(parsed, GeneratedClientInterviewQuestions):
