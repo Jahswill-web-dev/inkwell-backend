@@ -110,52 +110,15 @@ def test_create_and_access_guest_interview(client_context: TestClient) -> None:
     guest_data = guest_res.json()
     assert guest_data["invitation"]["progress_state"] == "opened"
     assert guest_data["invitation"]["article_title"] == "How to Conduct Interviews"
-    assert len(guest_data["session"]["questions"]) >= 5
 
-    # 3. Guest submits an answer
+    # Typed answer submission is no longer part of the public interview API.
     patch_res = client_context.patch(
         f"/api/v1/interviews/{token}",
-        json={
-            "state": "active",
-            "answers": [
-                {
-                    "question_id": "key-message",
-                    "question": "What is the key message?",
-                    "answer": "Ask specific follow-up questions to uncover concrete metrics.",
-                    "answered_at": "2026-09-10T12:00:00Z",
-                }
-            ],
-            "current_question_index": 1,
-        },
+        json={"state": "completed"},
     )
-    assert patch_res.status_code == 200
-    assert patch_res.json()["invitation"]["progress_state"] == "in_progress"
-    assert patch_res.json()["invitation"]["questions_answered"] == 1
+    assert patch_res.status_code == 405
 
-    # Check article status is now interview_in_progress
-    article_res = client_context.get(
-        f"/api/v1/articles/{article_id}", headers=headers(writer_token)
-    )
-    assert article_res.json()["status"] == "interview_in_progress"
-
-    # 4. Guest completes interview
-    complete_res = client_context.patch(
-        f"/api/v1/interviews/{token}",
-        json={
-            "state": "completed",
-            "completion_reason": "sufficient",
-        },
-    )
-    assert complete_res.status_code == 200
-    assert complete_res.json()["invitation"]["progress_state"] == "completed"
-
-    # Article status transitions to ready_to_draft
-    article_res = client_context.get(
-        f"/api/v1/articles/{article_id}", headers=headers(writer_token)
-    )
-    assert article_res.json()["status"] == "ready_to_draft"
-
-    # 5. Writer revokes invitation
+    # 3. Writer revokes invitation
     inv_id = invitation["id"]
     revoke_res = client_context.delete(
         f"/api/v1/articles/{article_id}/invitations/{inv_id}",

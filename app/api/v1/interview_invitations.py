@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -13,7 +14,6 @@ from app.db.session import get_db_session
 from app.schemas.common import ErrorResponse
 from app.schemas.interview_invitation import (
     GuestInterviewResponse,
-    GuestSessionUpdate,
     InterviewInvitationCreate,
     InterviewInvitationResponse,
 )
@@ -27,6 +27,7 @@ from app.services.interview_transcript_service import InterviewTranscriptService
 from app.services.openai_realtime import OpenAIRealtimeService
 
 router = APIRouter(tags=["interview invitations"])
+logger = logging.getLogger(__name__)
 
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"model": ErrorResponse},
@@ -154,11 +155,20 @@ async def create_realtime_interview_call(
 ) -> RealtimeCallResponse:
     invitation_service = InterviewInvitationService(session)
     interview = await invitation_service.get_guest_interview(token=token)
+    previous_turns = await InterviewTranscriptService(session).get_turns_for_guest(
+        token=token
+    )
 
     realtime_service = OpenAIRealtimeService(settings)
     sdp_answer = await realtime_service.create_call(
         sdp=payload.sdp,
         interview=interview,
+        previous_turns=previous_turns,
+    )
+    logger.info(
+        "interview_realtime_call_created invitation_id=%s prior_turn_count=%d",
+        interview.invitation.id,
+        len(previous_turns),
     )
 
     return RealtimeCallResponse(sdp=sdp_answer)
@@ -191,17 +201,3 @@ async def finalize_interview_transcript(
     return await InterviewTranscriptService(
         session, generator=getattr(request.app.state, "interview_insights_generator", None)
     ).finalize(token=token)
-
-
-@router.patch(
-    "/interviews/{token}",
-    response_model=GuestInterviewResponse,
-    responses=ERROR_RESPONSES,
-)
-async def update_guest_interview(
-    token: str,
-    payload: GuestSessionUpdate,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> GuestInterviewResponse:
-    service = InterviewInvitationService(session)
-    return await service.update_guest_session(token=token, payload=payload)

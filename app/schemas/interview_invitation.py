@@ -43,6 +43,11 @@ class InterviewInvitationResponse(BaseModel):
     updated_at: datetime
 
 
+class GuestInterviewResponse(BaseModel):
+    invitation: InterviewInvitationResponse
+    session: GuestSessionData
+
+
 class GuestQuestion(BaseModel):
     id: str
     text: str
@@ -66,11 +71,6 @@ class GuestSessionData(BaseModel):
     final_detail_added: bool = False
     draft_answer: str = ""
     updated_at: str | None = None
-
-
-class GuestInterviewResponse(BaseModel):
-    invitation: InterviewInvitationResponse
-    session: GuestSessionData
 
 
 class GuestSessionUpdate(BaseModel):

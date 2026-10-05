@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
 from uuid import UUID
 
@@ -18,6 +20,8 @@ from app.schemas.interview_transcript import (
     InterviewTranscriptResponse,
     TranscriptTurn,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,17 @@ class OpenAIInterviewInsightsGenerator:
                 message="Interview insights are unavailable",
             ) from exc
         parsed = response.output_parsed
+        logger.info(
+            "interview_insights_response_received response_status=%s parsed=%s",
+            getattr(response, "status", None),
+            isinstance(parsed, GeneratedInterviewInsights),
+        )
         if not isinstance(parsed, GeneratedInterviewInsights):
+            logger.warning(
+                "interview_insights_unparsed response_status=%s incomplete_reason=%s",
+                response.status,
+                getattr(getattr(response, "incomplete_details", None), "reason", None),
+            )
             raise AppError(
                 status_code=502,
                 code="interview_insights_invalid",
@@ -111,6 +125,12 @@ class InterviewTranscriptService:
         ]
         await self.session.flush()
         await self.session.refresh(transcript)
+        logger.info(
+            "interview_transcript_appended invitation_id=%s new_turn_count=%d total_turn_count=%d",
+            invitation.id,
+            len(new_turns),
+            len(transcript.turns),
+        )
         return transcript_response(transcript)
 
     async def finalize(self, *, token: str) -> InterviewTranscriptResponse:
@@ -124,17 +144,38 @@ class InterviewTranscriptService:
         transcript = await self._get_or_create(invitation.id)
         turns = [TranscriptTurn.model_validate(turn) for turn in transcript.turns]
         if not turns:
+            logger.warning(
+                "interview_transcript_finalize_rejected_empty invitation_id=%s",
+                invitation.id,
+            )
             raise AppError(
                 status_code=422,
                 code="transcript_empty",
                 message="No interview transcript is available yet",
             )
+        logger.info(
+            "interview_transcript_finalize_started invitation_id=%s "
+            "turn_count=%d insight_enabled=%s",
+            invitation.id,
+            len(turns),
+            self.generator is not None,
+        )
+        invitation.progress_state = "completed"
+        if invitation.completed_at is None:
+            invitation.completed_at = datetime.now(UTC)
+        if invitation.article:
+            invitation.article.status = "ready_to_draft"
         if self.generator is None:
-            raise AppError(
-                status_code=503,
-                code="interview_insights_unavailable",
-                message="Interview insights are not configured",
+            transcript.insight_status = "failed"
+            transcript.generation_error = "Interview insights are not configured"
+            await self.session.flush()
+            await self.session.refresh(transcript)
+            logger.warning(
+                "interview_transcript_finalized_without_insights invitation_id=%s turn_count=%d",
+                invitation.id,
+                len(turns),
             )
+            return transcript_response(transcript)
         try:
             result = await self.generator.generate(
                 article_title=invitation.article.working_title
@@ -142,21 +183,46 @@ class InterviewTranscriptService:
                 else "the article",
                 turns=turns,
             )
+            self._validate_sources(
+                result.insights,
+                {turn.item_id for turn in turns if turn.speaker == "participant"},
+            )
         except AppError as exc:
             transcript.insight_status = "failed"
             transcript.generation_error = exc.message
             await self.session.flush()
-            raise
-        self._validate_sources(
-            result.insights,
-            {turn.item_id for turn in turns if turn.speaker == "participant"},
-        )
+            await self.session.refresh(transcript)
+            logger.warning(
+                "interview_transcript_finalized_with_insight_failure "
+                "invitation_id=%s turn_count=%d error_code=%s",
+                invitation.id,
+                len(turns),
+                exc.code,
+            )
+            return transcript_response(transcript)
+        except Exception:
+            logger.exception(
+                "interview_insights_unexpected_failure invitation_id=%s turn_count=%d",
+                invitation.id,
+                len(turns),
+            )
+            transcript.insight_status = "failed"
+            transcript.generation_error = "Interview insights could not be generated"
+            await self.session.flush()
+            await self.session.refresh(transcript)
+            return transcript_response(transcript)
         transcript.insight_status = "ready"
         transcript.insights = result.insights.model_dump(mode="json")
         transcript.model_id = result.model_id
         transcript.generation_error = None
         await self.session.flush()
         await self.session.refresh(transcript)
+        logger.info(
+            "interview_transcript_finalized invitation_id=%s turn_count=%d insight_status=%s",
+            invitation.id,
+            len(turns),
+            transcript.insight_status,
+        )
         return transcript_response(transcript)
 
     async def get_for_writer(
@@ -177,6 +243,20 @@ class InterviewTranscriptService:
                 message="The interview transcript was not found",
             )
         return transcript_response(transcript)
+
+    async def get_turns_for_guest(self, *, token: str) -> list[TranscriptTurn]:
+        """Get already persisted dialogue for a replacement realtime connection."""
+        invitation = await self.invitations.get_by_token(token)
+        if invitation is None:
+            raise AppError(
+                status_code=404,
+                code="invitation_not_found",
+                message="This interview link isn't valid",
+            )
+        transcript = await self._get(invitation.id)
+        if transcript is None:
+            return []
+        return [TranscriptTurn.model_validate(turn) for turn in transcript.turns]
 
     async def _get(self, invitation_id: UUID) -> InterviewTranscript | None:
         return cast(
@@ -205,6 +285,12 @@ class InterviewTranscriptService:
             *insights.claims_to_verify,
         ]
         if any(not set(item.source_item_ids) <= valid_ids for item in sourced):
+            logger.warning(
+                "interview_insights_unknown_sources sourced_item_count=%d "
+                "valid_participant_turn_count=%d",
+                len(sourced),
+                len(valid_ids),
+            )
             raise AppError(
                 status_code=502,
                 code="interview_insights_invalid",

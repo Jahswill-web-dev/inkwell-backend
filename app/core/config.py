@@ -54,9 +54,9 @@ class Settings(BaseSettings):
     openrouter_max_output_tokens: int = Field(default=4096, gt=0)
     openrouter_data_collection: Literal["allow", "deny"] = "deny"
     openrouter_allow_fallbacks: bool = True
-    # OpenAI Realtime voice interviews
+    # OpenAI Live voice interviews
     openai_api_key: SecretStr | None = Field(default=None)
-    openai_realtime_model: str = Field(default="gpt-realtime", min_length=1)
+    openai_live_model: str = Field(default="gpt-live-1", min_length=1)
     openai_interview_question_model: str = Field(default="gpt-5.6-luna", min_length=1)
     openai_realtime_request_timeout_seconds: float = Field(default=20, gt=0)
 
