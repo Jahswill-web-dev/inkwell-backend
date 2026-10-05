@@ -46,6 +46,7 @@ class InterviewInvitationResponse(BaseModel):
 class GuestInterviewResponse(BaseModel):
     invitation: InterviewInvitationResponse
     session: GuestSessionData
+    voice_transport: Literal["openai_webrtc", "elevenlabs_webrtc"] = "openai_webrtc"
 
 
 class GuestQuestion(BaseModel):

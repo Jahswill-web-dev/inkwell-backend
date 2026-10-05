@@ -82,3 +82,28 @@ def test_rejects_invalid_openrouter_configuration() -> None:
         valid_settings(openrouter_base_url="openrouter.ai/api/v1")
     with pytest.raises(ValidationError):
         valid_settings(ai_provider="unknown")
+
+
+def test_voice_provider_defaults_to_openai_live() -> None:
+    settings = valid_settings()
+
+    assert settings.voice_interview_provider == "openai_live"
+    assert settings.elevenlabs_base_url == "https://api.elevenlabs.io"
+
+
+def test_elevenlabs_provider_requires_credentials_in_deployed_environments() -> None:
+    with pytest.raises(ValidationError, match="ELEVENLABS_API_KEY"):
+        valid_settings(app_env="staging", voice_interview_provider="elevenlabs")
+
+    settings = valid_settings(
+        app_env="staging",
+        voice_interview_provider="elevenlabs",
+        elevenlabs_api_key="test-eleven-key",
+        elevenlabs_agent_id="agent_test",
+    )
+    assert settings.voice_interview_provider == "elevenlabs"
+
+
+def test_selected_openai_provider_requires_key_in_production() -> None:
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        valid_settings(app_env="production")

@@ -21,10 +21,17 @@ from app.schemas.interview_transcript import (
     InterviewTranscriptResponse,
     TranscriptTurnBatch,
 )
-from app.schemas.realtime import RealtimeCallCreate, RealtimeCallResponse
+from app.schemas.realtime import (
+    OpenAIVoiceSessionResponse,
+    RealtimeCallCreate,
+    RealtimeCallResponse,
+    VoiceSessionAssociation,
+    VoiceSessionCreate,
+    VoiceSessionResponse,
+)
 from app.services.interview_invitation_service import InterviewInvitationService
 from app.services.interview_transcript_service import InterviewTranscriptService
-from app.services.openai_realtime import OpenAIRealtimeService
+from app.services.voice_interview import associate_voice_session, create_voice_provider
 
 router = APIRouter(tags=["interview invitations"])
 logger = logging.getLogger(__name__)
@@ -137,9 +144,65 @@ async def revoke_invitation(
 async def get_guest_interview(
     token: str,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> GuestInterviewResponse:
     service = InterviewInvitationService(session)
-    return await service.get_guest_interview(token=token)
+    interview = await service.get_guest_interview(token=token)
+    return interview.model_copy(
+        update={
+            "voice_transport": "elevenlabs_webrtc"
+            if settings.voice_interview_provider == "elevenlabs"
+            else "openai_webrtc"
+        }
+    )
+
+
+@router.post(
+    "/interviews/{token}/voice/session",
+    response_model=VoiceSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=ERROR_RESPONSES,
+)
+async def create_voice_interview_session(
+    token: str,
+    payload: VoiceSessionCreate,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> VoiceSessionResponse:
+    interview = await InterviewInvitationService(session).get_guest_interview(token=token)
+    previous_turns = await InterviewTranscriptService(session).get_turns_for_guest(token=token)
+    response = await create_voice_provider(session, settings).create_session(
+        payload=payload,
+        interview=interview,
+        previous_turns=previous_turns,
+    )
+    logger.info(
+        "interview_voice_session_created invitation_id=%s provider=%s prior_turn_count=%d",
+        interview.invitation.id,
+        settings.voice_interview_provider,
+        len(previous_turns),
+    )
+    return response
+
+
+@router.put(
+    "/interviews/{token}/voice/sessions/{voice_session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=ERROR_RESPONSES,
+)
+async def associate_interview_voice_session(
+    token: str,
+    voice_session_id: UUID,
+    payload: VoiceSessionAssociation,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> None:
+    interview = await InterviewInvitationService(session).get_guest_interview(token=token)
+    await associate_voice_session(
+        session,
+        invitation_id=interview.invitation.id,
+        voice_session_id=voice_session_id,
+        external_session_id=payload.external_session_id,
+    )
 
 
 @router.post(
@@ -153,25 +216,22 @@ async def create_realtime_interview_call(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> RealtimeCallResponse:
-    invitation_service = InterviewInvitationService(session)
-    interview = await invitation_service.get_guest_interview(token=token)
-    previous_turns = await InterviewTranscriptService(session).get_turns_for_guest(
-        token=token
-    )
+    if settings.voice_interview_provider != "openai_live":
+        from app.core.exceptions import AppError
 
-    realtime_service = OpenAIRealtimeService(settings)
-    sdp_answer = await realtime_service.create_call(
-        sdp=payload.sdp,
-        interview=interview,
-        previous_turns=previous_turns,
+        raise AppError(
+            status_code=409,
+            code="voice_transport_mismatch",
+            message="The legacy OpenAI voice endpoint is not active",
+        )
+    response = await create_voice_interview_session(
+        token,
+        VoiceSessionCreate(sdp=payload.sdp),
+        session,
+        settings,
     )
-    logger.info(
-        "interview_realtime_call_created invitation_id=%s prior_turn_count=%d",
-        interview.invitation.id,
-        len(previous_turns),
-    )
-
-    return RealtimeCallResponse(sdp=sdp_answer)
+    assert isinstance(response, OpenAIVoiceSessionResponse)
+    return RealtimeCallResponse(sdp=response.sdp)
 
 
 @router.post(

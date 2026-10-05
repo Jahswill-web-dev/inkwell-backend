@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.db.models.interview_transcript import InterviewTranscript
+from app.db.models.voice_session import VoiceSession
 from app.db.repositories.interview_invitation import InterviewInvitationRepository
 from app.prompts.interview_insights import SYSTEM_INSTRUCTION, build_prompt
 from app.schemas.interview_transcript import (
@@ -112,13 +113,14 @@ class InterviewTranscriptService:
                 message="This interview link isn't valid",
             )
         transcript = await self._get_or_create(invitation.id)
+        await self._validate_voice_sessions(invitation.id, turns)
         existing_ids = {turn["item_id"] for turn in transcript.turns}
-        new_turns: list[dict[str, str]] = []
+        new_turns: list[dict[str, Any]] = []
         for turn in turns:
             if turn.item_id in existing_ids:
                 continue
             existing_ids.add(turn.item_id)
-            new_turns.append(turn.model_dump())
+            new_turns.append(turn.model_dump(mode="json", exclude_none=True))
         transcript.turns = [
             *transcript.turns,
             *new_turns,
@@ -132,6 +134,88 @@ class InterviewTranscriptService:
             len(transcript.turns),
         )
         return transcript_response(transcript)
+
+    async def reconcile_elevenlabs_transcript(
+        self,
+        *,
+        external_session_id: str,
+        provider_turns: list[dict[str, Any]],
+        provider_metadata: dict[str, Any],
+    ) -> tuple[InterviewTranscriptResponse | None, bool, str | None]:
+        voice_session = cast(
+            VoiceSession | None,
+            await self.session.scalar(
+                select(VoiceSession).where(
+                    VoiceSession.provider == "elevenlabs",
+                    VoiceSession.external_session_id == external_session_id,
+                )
+            ),
+        )
+        if voice_session is None:
+            logger.warning(
+                "elevenlabs_webhook_unknown_conversation external_session_id=%s",
+                external_session_id,
+            )
+            return None, False, None
+
+        transcript = await self._get_or_create(voice_session.invitation_id)
+        existing_counts: dict[tuple[str, str], int] = {}
+        for value in transcript.turns:
+            if value.get("voice_session_id") != str(voice_session.id):
+                continue
+            key = (
+                str(value.get("speaker", "")),
+                _normalized_turn_text(str(value.get("text", ""))),
+            )
+            existing_counts[key] = existing_counts.get(key, 0) + 1
+
+        seen_counts: dict[tuple[str, str], int] = {}
+        additions: list[dict[str, Any]] = []
+        for index, value in enumerate(provider_turns):
+            role = value.get("role")
+            text = value.get("message")
+            if role not in {"user", "agent"} or not isinstance(text, str) or not text.strip():
+                continue
+            speaker = "participant" if role == "user" else "interviewer"
+            key = (speaker, _normalized_turn_text(text))
+            occurrence = seen_counts.get(key, 0) + 1
+            seen_counts[key] = occurrence
+            if occurrence <= existing_counts.get(key, 0):
+                continue
+            seconds = value.get("time_in_call_secs")
+            occurred_at_ms = (
+                max(0, int(float(seconds) * 1000))
+                if isinstance(seconds, (int, float))
+                else None
+            )
+            additions.append(
+                TranscriptTurn(
+                    item_id=f"elevenlabs:{external_session_id}:{index}",
+                    speaker=speaker,
+                    text=text.strip(),
+                    provider="elevenlabs",
+                    voice_session_id=voice_session.id,
+                    occurred_at_ms=occurred_at_ms,
+                ).model_dump(mode="json", exclude_none=True)
+            )
+
+        if additions:
+            transcript.turns = [*transcript.turns, *additions]
+            transcript.insight_status = "pending"
+            transcript.insights = None
+            transcript.model_id = None
+            transcript.generation_error = None
+        voice_session.status = "completed"
+        voice_session.ended_at = datetime.now(UTC)
+        voice_session.provider_metadata = provider_metadata
+        termination_reason = provider_metadata.get("termination_reason")
+        if isinstance(termination_reason, str):
+            voice_session.termination_reason = termination_reason[:80]
+        await self.session.flush()
+        await self.session.refresh(transcript)
+        invitation = await self.invitations.get(voice_session.invitation_id)
+        invitation_token = invitation.token if invitation else None
+        return transcript_response(transcript), bool(additions), invitation_token
 
     async def finalize(self, *, token: str) -> InterviewTranscriptResponse:
         invitation = await self.invitations.get_by_token(token)
@@ -277,6 +361,35 @@ class InterviewTranscriptService:
         await self.session.flush()
         return transcript
 
+    async def _validate_voice_sessions(
+        self, invitation_id: UUID, turns: list[TranscriptTurn]
+    ) -> None:
+        session_ids = {turn.voice_session_id for turn in turns if turn.voice_session_id is not None}
+        if not session_ids:
+            return
+        records = list(
+            (
+                await self.session.scalars(
+                    select(VoiceSession).where(
+                        VoiceSession.id.in_(session_ids),
+                        VoiceSession.invitation_id == invitation_id,
+                    )
+                )
+            ).all()
+        )
+        providers = {record.id: record.provider for record in records}
+        if len(providers) != len(session_ids) or any(
+            turn.voice_session_id is not None
+            and turn.provider is not None
+            and providers.get(turn.voice_session_id) != turn.provider
+            for turn in turns
+        ):
+            raise AppError(
+                status_code=422,
+                code="invalid_voice_session",
+                message="A transcript turn referenced an invalid voice session",
+            )
+
     @staticmethod
     def _validate_sources(insights: GeneratedInterviewInsights, valid_ids: set[str]) -> None:
         sourced = [
@@ -312,3 +425,7 @@ def transcript_response(transcript: InterviewTranscript) -> InterviewTranscriptR
         created_at=transcript.created_at,
         updated_at=transcript.updated_at,
     )
+
+
+def _normalized_turn_text(value: str) -> str:
+    return " ".join(value.casefold().split())

@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     openai_interview_question_model: str = Field(default="gpt-5.6-luna", min_length=1)
     openai_realtime_request_timeout_seconds: float = Field(default=20, gt=0)
 
+    # Realtime voice interview provider. This is deliberately server-controlled;
+    # interview guests cannot select or override it.
+    voice_interview_provider: Literal["openai_live", "elevenlabs"] = "openai_live"
+    elevenlabs_api_key: SecretStr | None = Field(default=None)
+    elevenlabs_agent_id: str | None = Field(default=None, min_length=1)
+    elevenlabs_webhook_secret: SecretStr | None = Field(default=None)
+    elevenlabs_base_url: str = "https://api.elevenlabs.io"
+    elevenlabs_request_timeout_seconds: float = Field(default=20, gt=0)
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     @field_validator("api_v1_prefix")
@@ -97,7 +106,9 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("openai_api_key", mode="before")
+    @field_validator(
+        "openai_api_key", "elevenlabs_api_key", "elevenlabs_webhook_secret", mode="before"
+    )
     @classmethod
     def normalize_openai_api_key(cls, value: object) -> object:
         if isinstance(value, str):
@@ -113,10 +124,36 @@ class Settings(BaseSettings):
             raise ValueError("OPENROUTER_BASE_URL must be an HTTP or HTTPS URL")
         return normalized
 
+    @field_validator("elevenlabs_agent_id", mode="before")
+    @classmethod
+    def normalize_elevenlabs_agent_id(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("elevenlabs_base_url")
+    @classmethod
+    def validate_elevenlabs_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        if not normalized.startswith(("https://", "http://")):
+            raise ValueError("ELEVENLABS_BASE_URL must be an HTTP or HTTPS URL")
+        return normalized
+
     @model_validator(mode="after")
     def reject_development_secret_in_production(self) -> Self:
         if self.app_env == "production" and self.jwt_secret_key.startswith("replace-"):
             raise ValueError("A non-development JWT secret is required in production")
+        if self.app_env in {"staging", "production"}:
+            if self.voice_interview_provider == "openai_live" and self.openai_api_key is None:
+                raise ValueError("OPENAI_API_KEY is required for the selected voice provider")
+            if self.voice_interview_provider == "elevenlabs" and (
+                self.elevenlabs_api_key is None or self.elevenlabs_agent_id is None
+            ):
+                raise ValueError(
+                    "ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID are required for the selected "
+                    "voice provider"
+                )
         return self
 
 

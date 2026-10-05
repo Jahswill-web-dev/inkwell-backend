@@ -13,6 +13,9 @@ class TranscriptTurn(BaseModel):
     item_id: str = Field(min_length=1, max_length=200)
     speaker: Literal["participant", "interviewer"]
     text: str = Field(min_length=1, max_length=10_000)
+    provider: Literal["openai_live", "elevenlabs"] | None = None
+    voice_session_id: UUID | None = None
+    occurred_at_ms: int | None = Field(default=None, ge=0)
 
 
 class TranscriptTurnBatch(BaseModel):

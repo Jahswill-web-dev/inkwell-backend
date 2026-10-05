@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, cast
 
 from openai import AsyncOpenAI
@@ -13,6 +14,12 @@ from app.schemas.interview_invitation import GuestInterviewResponse
 from app.schemas.interview_transcript import TranscriptTurn
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OpenAICallResult:
+    sdp: str
+    external_session_id: str
 
 END_INTERVIEW_TOOL: dict[str, Any] = {
     "type": "function",
@@ -185,7 +192,7 @@ class OpenAIRealtimeService:
         sdp: str,
         interview: GuestInterviewResponse,
         previous_turns: list[TranscriptTurn] | None = None,
-    ) -> str:
+    ) -> OpenAICallResult:
         try:
             response = await self._client.live.create(
                 session=cast(
@@ -218,7 +225,10 @@ class OpenAIRealtimeService:
             ) from exc
 
         start_live_sideband_controller(self._client, response.session.id)
-        return response.transport.sdp
+        return OpenAICallResult(
+            sdp=response.transport.sdp,
+            external_session_id=response.session.id,
+        )
 
 
 _sideband_tasks: set[asyncio.Task[None]] = set()

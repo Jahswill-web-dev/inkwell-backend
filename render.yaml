@@ -53,6 +53,20 @@ services:
         value: "true"
       - key: LOG_LEVEL
         value: INFO
+      - key: VOICE_INTERVIEW_PROVIDER
+        value: openai_live
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_AGENT_ID
+        sync: false
+      - key: ELEVENLABS_WEBHOOK_SECRET
+        sync: false
+      - key: ELEVENLABS_BASE_URL
+        value: https://api.elevenlabs.io
+      - key: ELEVENLABS_REQUEST_TIMEOUT_SECONDS
+        value: "20"
 
 databases:
   - name: inkwell-postgres

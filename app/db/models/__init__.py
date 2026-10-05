@@ -10,6 +10,7 @@ from app.db.models.interview_transcript import InterviewTranscript
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.section_interview import SectionInterview
 from app.db.models.user import User
+from app.db.models.voice_session import VoiceSession
 from app.db.models.workspace import Workspace, WorkspaceMember
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "LoginRateLimit",
     "SectionInterview",
     "User",
+    "VoiceSession",
     "Workspace",
     "WorkspaceMember",
 ]

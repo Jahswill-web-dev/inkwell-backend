@@ -1,8 +1,47 @@
-from pydantic import BaseModel, Field
+from __future__ import annotations
+
+from typing import Annotated, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class VoiceSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sdp: str | None = Field(default=None, min_length=1, max_length=200_000)
+
+
+class OpenAIVoiceSessionResponse(BaseModel):
+    transport: Literal["openai_webrtc"] = "openai_webrtc"
+    session_id: UUID
+    sdp: str
+
+
+class ElevenLabsVoiceSessionResponse(BaseModel):
+    transport: Literal["elevenlabs_webrtc"] = "elevenlabs_webrtc"
+    session_id: UUID
+    conversation_token: str
+    conversation_id: str | None = None
+    dynamic_variables: dict[str, str | int | bool]
+
+
+VoiceSessionResponse = Annotated[
+    OpenAIVoiceSessionResponse | ElevenLabsVoiceSessionResponse,
+    Field(discriminator="transport"),
+]
+
+
+class VoiceSessionAssociation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_session_id: str = Field(min_length=1, max_length=200)
 
 
 class RealtimeCallCreate(BaseModel):
     """The WebRTC offer generated in the browser."""
+
+    model_config = ConfigDict(extra="forbid")
 
     sdp: str = Field(min_length=1, max_length=200_000)
 
