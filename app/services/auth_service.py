@@ -36,17 +36,34 @@ class AuthService:
         self.settings = settings
         self.login_rate_limiter = login_rate_limiter
 
-    async def register(self, *, email: str, username: str, password: str) -> AuthResult:
+    async def register(
+        self, *, email: str, username: str, password: str, experience: str = "marketing"
+    ) -> AuthResult:
+        if experience == "consultant" and not self.settings.consultant_enabled:
+            raise AppError(
+                status_code=503,
+                code="consultant_disabled",
+                message="Consultant signup is not available yet.",
+            )
         if await self.users.get_by_email(email) is not None:
             raise _email_conflict()
         if await self.users.get_by_username(username) is not None:
             raise _username_conflict()
 
         password_hash = await run_in_threadpool(hash_password, password)
-        user = User(email=email, username=username, password_hash=password_hash)
+        user = User(
+            email=email,
+            username=username,
+            password_hash=password_hash,
+            preferred_experience=experience,
+        )
         try:
             await self.users.add(user)
-            workspace = Workspace(name=f"{username}'s workspace")
+            workspace = Workspace(
+                name=f"{username}'s workspace",
+                experience=experience,
+                personal_owner_id=user.id if experience == "consultant" else None,
+            )
             self.users.session.add(workspace)
             await self.users.session.flush()
             self.users.session.add(

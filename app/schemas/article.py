@@ -180,6 +180,7 @@ class ArticleResponse(ArticleFields):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    experience: str = "marketing"
     user_id: UUID
     workspace_id: UUID
     client_id: UUID | None

@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.schemas.interview_invitation import GuestInterviewResponse
 from app.schemas.interview_transcript import TranscriptTurn
+from app.services.interview_context import ConsultantVoiceContext
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 class OpenAICallResult:
     sdp: str
     external_session_id: str
+
 
 END_INTERVIEW_TOOL: dict[str, Any] = {
     "type": "function",
@@ -67,10 +69,12 @@ def _resume_context(turns: list[TranscriptTurn]) -> str:
 
 
 def build_live_voice_instructions(
-    interview: GuestInterviewResponse,
+    interview: GuestInterviewResponse | ConsultantVoiceContext,
     previous_turns: list[TranscriptTurn] | None = None,
 ) -> str:
     """Build the concise conversation prompt for GPT-Live."""
+    if isinstance(interview, ConsultantVoiceContext):
+        return interview.instructions(_resume_context(previous_turns or []))
     article_title = interview.invitation.article_title or "the upcoming article"
     client_name = interview.invitation.client_name or "the client's team"
     writer_name = interview.invitation.writer_name or "the writer"
@@ -98,10 +102,12 @@ that an answer has been saved, published, or approved."""
 
 
 def build_interview_workflow_instructions(
-    interview: GuestInterviewResponse,
+    interview: GuestInterviewResponse | ConsultantVoiceContext,
     previous_turns: list[TranscriptTurn] | None = None,
 ) -> str:
     """Build server-controlled instructions for one client voice interview."""
+    if isinstance(interview, ConsultantVoiceContext):
+        return interview.instructions(_resume_context(previous_turns or []))
     article_title = interview.invitation.article_title or "the upcoming article"
     client_name = interview.invitation.client_name or "the client's team"
     writer_name = interview.invitation.writer_name or "the writer"
@@ -190,7 +196,7 @@ class OpenAIRealtimeService:
         self,
         *,
         sdp: str,
-        interview: GuestInterviewResponse,
+        interview: GuestInterviewResponse | ConsultantVoiceContext,
         previous_turns: list[TranscriptTurn] | None = None,
     ) -> OpenAICallResult:
         try:

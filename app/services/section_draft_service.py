@@ -47,6 +47,12 @@ class SectionDraftService:
         if article is None:
             raise _error(404, "article_not_found", "Article not found")
 
+        if article.experience == "consultant":
+            raise _error(
+                409,
+                "consultant_workflow_required",
+                "Use voice-aware rewrites in the consultant workspace.",
+            )
         draft = await self.drafts.get_for_article(article_id)
         if draft is None:
             raise _error(404, "draft_not_found", "Draft not found")

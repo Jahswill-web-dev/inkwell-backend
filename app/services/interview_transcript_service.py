@@ -158,6 +158,8 @@ class InterviewTranscriptService:
             )
             return None, False, None
 
+        if voice_session.invitation_id is None:
+            return None, False, None
         transcript = await self._get_or_create(voice_session.invitation_id)
         existing_counts: dict[tuple[str, str], int] = {}
         for value in transcript.turns:

@@ -68,6 +68,13 @@ class ArticleDraftService:
     async def update(
         self, *, article_id: UUID, user_id: UUID, payload: ArticleDraftUpdate
     ) -> ArticleDraftResponse:
+        article = await self.articles.get_owned(article_id, user_id)
+        if article is not None and article.experience == "consultant":
+            raise AppError(
+                status_code=409,
+                code="consultant_workflow_required",
+                message="Save consultant drafts in the consultant workspace.",
+            )
         await self._require_owned_article(article_id=article_id, user_id=user_id)
         draft = await self._get_draft(article_id)
         sections = [section.model_dump(mode="json") for section in payload.sections]

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     login_rate_limit_window_seconds: int = Field(default=900, gt=0)
 
     ai_provider: Literal["vertex", "openrouter"] = "vertex"
+    consultant_enabled: bool = True
+    consultant_model: str = "gpt-5.6-sol"
+    consultant_request_timeout_seconds: float = 120
 
     vertex_project_id: str | None = None
     vertex_location: str = "global"

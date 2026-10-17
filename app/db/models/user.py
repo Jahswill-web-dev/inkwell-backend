@@ -16,3 +16,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     username: Mapped[str] = mapped_column(String(30), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    preferred_experience: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="marketing", server_default="marketing"
+    )

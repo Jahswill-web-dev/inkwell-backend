@@ -1,10 +1,12 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
 
 class RegisterRequest(BaseModel):
+    experience: Literal["marketing", "consultant"] = "marketing"
     email: EmailStr
     username: str = Field(min_length=3, max_length=30, pattern=r"^[a-z0-9_]+$")
     password: SecretStr = Field(min_length=8, max_length=128)
@@ -26,6 +28,13 @@ class PublicUser(BaseModel):
     id: UUID
     email: EmailStr
     username: str
+    preferred_experience: Literal["marketing", "consultant"] = "marketing"
+
+    @field_validator("preferred_experience", mode="before")
+    @classmethod
+    def default_experience(cls, value: object) -> object:
+        return value or "marketing"
+
     created_at: datetime
     updated_at: datetime
 

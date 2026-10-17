@@ -30,6 +30,7 @@ async def register(
         email=str(payload.email),
         username=payload.username,
         password=payload.password.get_secret_value(),
+        experience=payload.experience,
     )
     return AuthResponse(
         access_token=result.access_token,

@@ -14,6 +14,12 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "workspaces"
 
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    experience: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="marketing", server_default="marketing"
+    )
+    personal_owner_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, unique=True
+    )
 
 
 class WorkspaceMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):

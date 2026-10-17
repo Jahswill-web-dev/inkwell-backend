@@ -23,6 +23,12 @@ class ArticleService:
 
     async def create(self, *, user_id: UUID, payload: ArticleCreate) -> Article:
         workspace = await self._default_workspace(user_id)
+        if workspace.experience == "consultant":
+            raise AppError(
+                status_code=409,
+                code="marketing_workspace_required",
+                message="Switch to content marketing before creating a marketing article.",
+            )
         client_id = payload.client_id
         assignee_id = payload.assignee_id or user_id
         await self._validate_client(client_id, workspace.id)
@@ -59,6 +65,12 @@ class ArticleService:
 
     async def update(self, *, article_id: UUID, user_id: UUID, payload: ArticleUpdate) -> Article:
         article = await self.get(article_id=article_id, user_id=user_id)
+        if article.experience == "consultant":
+            raise AppError(
+                status_code=409,
+                code="consultant_workflow_required",
+                message="Use the consultant workspace to update this article.",
+            )
         values = payload.model_dump(exclude_unset=True, mode="python")
         if "client_id" in values:
             await self._validate_client(values["client_id"], article.workspace_id)

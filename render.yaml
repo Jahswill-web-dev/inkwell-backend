@@ -51,6 +51,10 @@ services:
         value: deny
       - key: OPENROUTER_ALLOW_FALLBACKS
         value: "true"
+      - key: CONSULTANT_ENABLED
+        value: "true"
+      - key: CONSULTANT_MODEL
+        value: gpt-5.6-sol
       - key: LOG_LEVEL
         value: INFO
       - key: VOICE_INTERVIEW_PROVIDER
@@ -67,6 +71,33 @@ services:
         value: https://api.elevenlabs.io
       - key: ELEVENLABS_REQUEST_TIMEOUT_SECONDS
         value: "20"
+
+  - type: worker
+    name: inkwell-consultant-worker
+    runtime: python
+    region: frankfurt
+    plan: starter
+    buildCommand: uv sync --frozen && uv cache prune --ci
+    startCommand: uv run python -m app.workers.consultant
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: inkwell-postgres
+          property: connectionString
+      - key: JWT_SECRET_KEY
+        fromService:
+          type: web
+          name: inkwell-api
+          envVarKey: JWT_SECRET_KEY
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CONSULTANT_MODEL
+        value: gpt-5.6-sol
+      - key: CONSULTANT_ENABLED
+        value: "true"
 
 databases:
   - name: inkwell-postgres

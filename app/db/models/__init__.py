@@ -11,6 +11,12 @@ from app.db.models.client_knowledge import (
     ClientKnowledgeProposalSource,
     ClientKnowledgeSource,
 )
+from app.db.models.consultant import (
+    ConsultantDraftRevision,
+    ConsultantGeneration,
+    ConsultantInterview,
+    ConsultantProfile,
+)
 from app.db.models.interview_invitation import InterviewInvitation
 from app.db.models.interview_transcript import InterviewTranscript
 from app.db.models.login_rate_limit import LoginRateLimit
@@ -30,6 +36,10 @@ __all__ = [
     "ClientKnowledgeProposal",
     "ClientKnowledgeProposalSource",
     "ClientKnowledgeSource",
+    "ConsultantDraftRevision",
+    "ConsultantGeneration",
+    "ConsultantInterview",
+    "ConsultantProfile",
     "InterviewInvitation",
     "InterviewTranscript",
     "LoginRateLimit",

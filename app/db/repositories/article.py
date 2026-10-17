@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,7 +19,11 @@ class ArticleRepository(Repository[Article]):
             select(Article)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Article.workspace_id)
             .options(selectinload(Article.client), selectinload(Article.assignee))
-            .where(Article.id == article_id, WorkspaceMember.user_id == user_id)
+            .where(
+                Article.id == article_id,
+                WorkspaceMember.user_id == user_id,
+                or_(Article.experience == "marketing", Article.user_id == user_id),
+            )
         )
         return result.first()
 
@@ -36,7 +40,7 @@ class ArticleRepository(Repository[Article]):
             select(Article)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Article.workspace_id)
             .options(selectinload(Article.client), selectinload(Article.assignee))
-            .where(WorkspaceMember.user_id == user_id)
+            .where(WorkspaceMember.user_id == user_id, Article.experience == "marketing")
             .order_by(Article.created_at.desc(), Article.id.desc())
             .offset(offset)
             .limit(limit)
@@ -48,6 +52,6 @@ class ArticleRepository(Repository[Article]):
             select(func.count())
             .select_from(Article)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Article.workspace_id)
-            .where(WorkspaceMember.user_id == user_id)
+            .where(WorkspaceMember.user_id == user_id, Article.experience == "marketing")
         )
         return count or 0

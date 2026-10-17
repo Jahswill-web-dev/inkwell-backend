@@ -80,6 +80,12 @@ class InterviewInvitationService:
     ) -> InterviewInvitationResponse:
         workspace_id = await self._workspace_id(user_id)
         article = await self.articles.get_in_workspace(article_id, workspace_id)
+        if article is not None and article.experience == "consultant":
+            raise AppError(
+                status_code=409,
+                code="consultant_private",
+                message="Consultant interviews are private. Use the consultant workspace.",
+            )
         if article is None:
             raise AppError(
                 status_code=404, code="article_not_found", message="The article was not found"

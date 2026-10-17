@@ -5,6 +5,7 @@ from app.api.v1 import (
     articles,
     auth,
     clients,
+    consultant,
     drafts,
     elevenlabs_webhooks,
     interview_invitations,
@@ -28,3 +29,5 @@ router.include_router(drafts.router)
 router.include_router(section_interviews.router)
 router.include_router(reviews.router)
 router.include_router(jobs.router)
+
+router.include_router(consultant.router)

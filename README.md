@@ -4,6 +4,18 @@ Inkwell Backend is an asynchronous REST API built with FastAPI and PostgreSQL. T
 organized into small, domain-focused modules so that API routes, business logic, database access,
 validation, and infrastructure concerns remain separate as the application grows.
 
+## Experiences
+
+- **Content marketing:** clients, source collection, briefs, outlines, section drafting, and review.
+- **Consultant:** personal workspace, live or typed self-interview, automatic full-article drafting,
+  approved voice preferences, and explicit revision proposals.
+
+One account can enable both experiences. Consultant articles and interviews remain private to their
+owner, separate from marketing workspace membership. Existing accounts and articles default to marketing.
+
+See [Consultant API reference](#consultant-api-reference) for endpoints and payloads,
+[Consultant setup](#consultant-setup) for the worker, and [rollout guidance](CONSULTANT_ROLLOUT.md).
+
 ## Tech Stack
 
 - Python 3.12+
@@ -12,7 +24,8 @@ validation, and infrastructure concerns remain separate as the application grows
 - SQLAlchemy 2 with async psycopg
 - Alembic database migrations
 - Pydantic and pydantic-settings
-- OpenRouter with DeepSeek, or Gemini on Vertex AI
+- OpenRouter with DeepSeek, or Gemini on Vertex AI for marketing generation
+- OpenAI Responses for consultant writing and OpenAI live audio for consultant interviews
 - Argon2 password hashing with pwdlib
 - JWT authentication with PyJWT
 - uv for dependency and virtual-environment management
@@ -79,8 +92,9 @@ Do not commit the `.env` file.
 
 ### 3. Configure an AI provider
 
-The backend supports OpenRouter and Vertex AI. `AI_PROVIDER` selects one provider for all AI
-workflows; there is no automatic fallback between them.
+The marketing generation backend supports OpenRouter and Vertex AI. `AI_PROVIDER` selects between
+those providers; there is no automatic fallback between them. Consultant writing and live interviews
+use separate OpenAI settings described under [Consultant setup](#consultant-setup).
 
 #### OpenRouter
 
@@ -186,6 +200,9 @@ Review the generated migration, then apply it:
 uv run alembic upgrade head
 ```
 
+Only roll back after reviewing the migration and its data implications. The consultant migration
+refuses downgrade when consultant articles exist; use the feature flag for rollout rollback.
+
 Roll back the most recent migration:
 
 ```powershell
@@ -231,7 +248,8 @@ To roll back from OpenRouter to Vertex, restore valid Google credentials, set
 ## Deploying to Render
 
 The repository includes a `render.yaml` Blueprint for a free Render web service and managed
-PostgreSQL database. It installs the locked dependencies with uv, applies Alembic migrations, and
+PostgreSQL database, plus a separate consultant worker configured on the `starter` plan.
+The worker is required for consultant drafting. The web service installs the locked dependencies with uv, applies Alembic migrations, and
 starts Uvicorn on Render's assigned port.
 
 1. Push this repository to GitHub, GitLab, or Bitbucket.
@@ -1590,3 +1608,206 @@ type SectionInterview = {
 | `502 Bad Gateway` | `section_questions_generation_failed` or `section_draft_generation_failed` | The provider returned invalid structured output |
 | `503 Service Unavailable` | `section_questions_generation_unavailable` or `section_draft_generation_unavailable` | Generation is not configured or the provider is unavailable |
 | `504 Gateway Timeout` | `section_questions_generation_timeout` or `section_draft_generation_timeout` | Generation exceeded the configured timeout |
+
+
+## Consultant setup
+
+After installing dependencies and applying `uv run alembic upgrade head`, configure the API and worker:
+
+```env
+OPENAI_API_KEY=your-server-side-key
+CONSULTANT_ENABLED=true
+CONSULTANT_MODEL=gpt-5.6-sol
+CONSULTANT_REQUEST_TIMEOUT_SECONDS=120
+OPENAI_LIVE_MODEL=gpt-live-1
+OPENAI_INTERVIEW_QUESTION_MODEL=gpt-5.6-luna
+OPENAI_REALTIME_REQUEST_TIMEOUT_SECONDS=20
+```
+
+`CONSULTANT_MODEL` controls the understand/write/check pipeline independently of marketing models.
+Typed follow-up questions use `OPENAI_INTERVIEW_QUESTION_MODEL`. Consultant voice uses OpenAI live
+regardless of `VOICE_INTERVIEW_PROVIDER`, which still controls marketing voice sessions.
+
+Start the API and, in a second terminal with the same database configuration, start the worker:
+
+```powershell
+uv run python -m app.workers.consultant
+```
+
+The worker uses PostgreSQL jobs, atomic claiming, renewable leases, stage checkpoints, and bounded
+transient retries. No Redis or broker is required. Jobs continue after the browser closes. Without
+this process, jobs remain queued. Configure the OpenAI key on **both** API and worker services.
+
+`CONSULTANT_ENABLED` defaults to true, so the signup option appears without extra configuration.
+Setting it to false stops new consultant signup/workspace enablement while preserving
+access to existing consultant work. Do not delete records or downgrade to roll back the UI rollout.
+See [CONSULTANT_ROLLOUT.md](CONSULTANT_ROLLOUT.md) for deployment, recovery, and evaluation details.
+
+## Consultant API reference
+
+All paths below are relative to `/api/v1/consultant`. All require bearer authentication except
+`GET /availability`. Successful calls return `200` unless stated otherwise. UUID path parameters
+refer to owned resources; marketing workspace membership does not grant access to consultant work.
+The generated [OpenAPI schema](http://127.0.0.1:8000/openapi.json) describes request schemas.
+
+### Account and profile endpoints
+
+| Method | Path | Purpose / response |
+| --- | --- | --- |
+| GET | `/availability` | Public feature availability: `{"enabled": true}` by default |
+| GET | `/experience` | Preferred `experience` and `enabled_experiences` |
+| PUT | `/experience` | Enable/select `marketing` or `consultant`; creates the workspace if needed |
+| GET | `/profile` | Display name, specialty, audience, onboarding flag, approved voice, voice revision, suggested voice |
+| PUT | `/profile` | Save onboarding/profile fields and mark onboarding complete |
+| PUT | `/voice` | Save, approve, dismiss, or reset voice preferences |
+
+Registration at `POST /api/v1/auth/register` accepts optional `experience: "marketing" | "consultant"`
+alongside the existing registration fields. Omission retains the marketing default. User responses
+include `preferred_experience`. Account, initial workspace, and preference are created together.
+`GET /api/v1/workspaces/current?experience=consultant` resolves the personal workspace; without the
+query parameter the existing default-workspace behavior is preserved. Enable an experience before
+resolving a workspace that does not yet exist.
+
+```json
+{"experience": "consultant"}
+```
+
+Use that body for `PUT /experience`. Profile updates accept:
+
+```json
+{"display_name": "Alex Morgan", "specialty": "Operations consulting", "audience": "Small business owners"}
+```
+
+Only `display_name` is required (1–120 characters); specialty and audience default to empty strings
+and allow up to 500 characters each. Voice updates accept `{"action":"approve"}`,
+`{"action":"dismiss"}`, `{"action":"reset"}`, or `{"action":"save","voice":{...}}`.
+The editable voice object contains `vocabulary`, `avoid`, and `excerpts` string arrays, plus
+`explanation_patterns`, `analogies`, `formality`, `rhythm`, and `perspective` strings. Saving or
+approving increments the approved revision. Suggestions never silently replace approved preferences.
+Older voice excerpts guide style only; they do not supply facts for a new article.
+
+### Articles, interviews, and drafts
+
+| Method | Path | Purpose / response |
+| --- | --- | --- |
+| GET | `/articles?offset=0&limit=50` | List owned consultant articles as `items`; maximum limit 100 |
+| POST | `/articles` | Save minimal setup; `201` with `{"id":"..."}` |
+| GET | `/articles/{article_id}` | Setup, status, interviews, latest job, accepted sections, draft timestamp, revisions |
+| PUT | `/articles/{article_id}/details` | Update title and description; blocked during active generation |
+| POST | `/articles/{article_id}/interviews` | Create or resume unfinished interview; returns its `id` |
+| GET | `/interviews/{interview_id}` | Setup, questions, state, original turns, and separate corrections |
+| POST | `/interviews/{interview_id}/voice/session` | Exchange SDP offer for authenticated OpenAI WebRTC session |
+| POST | `/interviews/{interview_id}/transcript` | Append deduplicated transcript turns |
+| POST | `/interviews/{interview_id}/answer` | Save typed answer and generate next question; returns `saved` and `complete` |
+| PUT | `/interviews/{interview_id}/corrections` | Merge corrections/exclusions keyed by existing turn IDs |
+| POST | `/interviews/{interview_id}/pause` | Persist pause; does not enqueue generation |
+| POST | `/interviews/{interview_id}/finish` | Finalize and queue one generation job atomically; returns job |
+| POST | `/interviews/{interview_id}/generate` | Request updated/rewrite proposal from completed interview |
+| POST | `/jobs/{job_id}/retry` | Requeue failed job; returns job |
+| PUT | `/articles/{article_id}/draft` | Save edited sections with optimistic concurrency and revision history |
+| POST | `/articles/{article_id}/revisions/{revision_id}/apply` | Explicitly accept proposal or restore a stored revision |
+
+There is no separate consultant job-status endpoint: poll article detail and read `job`.
+A job response includes `id`, `state`, `stage`, `error`, `attempts`, and `created_at`.
+
+Create an article before requesting microphone access:
+
+```json
+{
+  "title": "Why more dashboards will not fix your handoffs",
+  "description": "I want to explain how unclear ownership creates expensive confusion.",
+  "audience": "Operations leaders",
+  "takeaway": "Assign an owner to the next step",
+  "length": "standard"
+}
+```
+
+`title` (1–200) and `description` (1–20,000) are required. Audience and takeaway are optional
+(up to 500 each); length is `short`, `standard` (default), or `long`. No client or brief is needed.
+The backend maps this to a self-interview blog post. Article audience falls back to the profile,
+then a provisional topic audience. Detail updates accept only `title` and `description`.
+
+For live sessions, send `{"sdp":"<WebRTC offer>"}` and use the returned `sdp` answer,
+`session_id`, `provider: "openai_live"`, and `transport: "openai_webrtc"`.
+Persist completed transcript turns before finishing:
+
+```json
+{
+  "turns": [
+    {"item_id": "turn-1", "speaker": "participant", "text": "I call that expensive confusion."}
+  ]
+}
+```
+
+A batch allows up to 100 turns. Each has a stable `item_id` (up to 200 characters), speaker
+`participant` or `interviewer`, and text (1–10,000 characters). Optional metadata is `provider`,
+`voice_session_id`, and nonnegative `occurred_at_ms`. Session IDs must belong to this interview.
+Retries with the same ID do not append duplicates; use corrections to change an existing turn.
+
+Typed answers accept `{"item_id":"answer-1","text":"My perspective...","skip":false}`.
+Keep the same item ID on retry. Text allows up to 20,000 characters, and item IDs up to 190.
+After a configured provider call fails, the saved answer can be retried without duplicating it.
+Fetch the interview again for the next question. If `complete` is true, call `/finish` after all
+pending transcript writes are acknowledged; the typed answer endpoint does not itself finalize.
+
+Corrections preserve the original recording text:
+
+```json
+{"corrections":{"turn-1":{"text":"I call that costly confusion.","excluded":false}}}
+```
+
+Use `excluded: true` for material that must not enter generation. To restore a turn to its original
+text, send `text: null` and `excluded: false`. A correction increments the transcript revision.
+
+### Generation, revision safety, and errors
+
+`POST /finish` takes no body and is idempotent. Silence, pause, or disconnect does not finish an
+interview. Finalized interviews reject new turns; create a follow-up interview to add material.
+The snapshot includes corrected, non-excluded participant evidence, interview context, article
+settings, and the approved voice revision. The worker stores model/prompt metadata and stage results.
+
+Explicit regeneration uses a stable request key for retries:
+
+```json
+{"request_key":"revision-request-1","instruction":"closer"}
+```
+
+Allowed instructions are `initial`, `updated`, `clearer`, `concise`, and `closer`. A new intentional
+request needs a new key (1–120 characters). Only one queued/running generation is allowed per article.
+The first successful draft is saved automatically. Later generations produce proposals and preserve
+accepted edits. Source checks and one targeted repair pass run before a candidate is marked ready.
+
+Draft saving accepts the existing `ArticleDraftUpdate` schema (`sections` containing IDs, title,
+goal, checklist, and serialized Lexical `editor_state`). When a draft exists, both save and apply
+require `If-Unmodified-Since` set to the **exact ISO timestamp** returned as `draft_updated_at`.
+This API uses the returned ISO value, not a reformatted HTTP-date. Refetch after each mutation.
+Missing or stale timestamps return `409 draft_conflict`. Generated proposals whose interview
+revision is outdated return `409 stale_proposal`; generate a fresh proposal before applying it.
+
+Other useful errors include `409 generation_running`, `409 interview_finalized`,
+`409 interview_not_finished`, `422 invalid_turn`, `422 voice_session_mismatch`,
+`422 voice_sdp_required`, `503 ai_unavailable`, and `502 interviewer_unavailable`.
+Validation failures return `422`; unavailable owned resources return `404`. Errors use the existing
+API error envelope. Failed jobs carry an error and remain retryable rather than pretending a draft
+was created. Read the job response as well as the HTTP status when displaying generation progress.
+
+### Consultant verification and source map
+
+```powershell
+uv run pytest app/tests/unit/test_consultant.py
+# Requires the isolated PostgreSQL test service:
+uv run pytest app/tests/integration/test_consultant.py
+```
+
+- Routes: `app/api/v1/consultant.py`; request contracts: `app/schemas/consultant.py`.
+- Ownership, snapshots, and revisions: `app/services/consultant_service.py`.
+- Versioned interview/writing policy: `app/prompts/consultant.py`.
+- Structured generation and source validation: `app/services/consultant_writer.py`.
+- Durable worker: `app/workers/consultant.py`.
+- Additive schema: `alembic/versions/20261017_0016_consultant_experience.py`.
+- Human voice evaluation fixtures: `app/tests/fixtures/consultant_voice_eval.json`.
+
+Mocked tests do not establish real microphone reliability or voice quality. Validate a real provider
+session and have consultants review the evaluation cases before broad release. Application transcript
+text is retained with the article; this implementation does not store raw audio. Keep transcript
+contents out of routine logs and analytics.

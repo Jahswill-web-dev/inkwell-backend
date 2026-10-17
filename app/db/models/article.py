@@ -101,6 +101,9 @@ class Article(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     notes: Mapped[str] = mapped_column(Text, nullable=False)
+    experience: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="marketing", server_default="marketing"
+    )
     working_title: Mapped[str] = mapped_column(String(200), nullable=False)
     target_audience: Mapped[list[str]] = mapped_column(ARRAY(String(500)), nullable=False)
     article_goal: Mapped[str] = mapped_column(String(64), nullable=False)
