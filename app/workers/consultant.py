@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import sys
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError
-from sqlalchemy import and_, or_, select, update
+from pydantic import ValidationError
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,13 +22,16 @@ from app.db.models.consultant import (
     ConsultantDraftRevision,
     ConsultantGeneration,
     ConsultantInterview,
-    ConsultantProfile,
 )
 from app.db.session import create_engine, create_session_factory
 from app.schemas.consultant import Evidence, GeneratedDraft
 from app.services.consultant_writer import (
     ConsultantWriter,
+    ModelOutputError,
+    compact_snapshot,
     editor_sections,
+    sanitize_draft_quotes,
+    sanitize_evidence,
     validate_draft,
     validate_evidence,
 )
@@ -114,14 +120,29 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             snapshot, model = job.snapshot, job.model_id
             previous_usage = job.usage
             evidence_data, candidate_data = job.evidence, job.candidate
+        model_snapshot = compact_snapshot(snapshot)
         writer = ConsultantWriter(settings, model)
         writer.usage.update(previous_usage or {})
         evidence = (
             Evidence.model_validate(evidence_data)
             if evidence_data
-            else await writer.understand(snapshot)
+            else await writer.understand(model_snapshot)
         )
-        validate_evidence(evidence, snapshot["turns"])
+        evidence = sanitize_evidence(evidence, model_snapshot["turns"])
+        validate_evidence(evidence, model_snapshot["turns"])
+        needs_research = bool(re.search(
+            r"\b(source|sources|citations?|research|stud(?:y|ies)|statistics?|"
+            r"real.world|case stud(?:y|ies)|public example)\b",
+            str(snapshot.get("instruction", "")), re.IGNORECASE,
+        ))
+        if needs_research and "external_research" not in snapshot:
+            await checkpoint(factory, job_id, token, stage="research", usage=writer.usage)
+            research = await writer.research(model_snapshot)
+            snapshot = {**snapshot, "external_research": research}
+            model_snapshot["external_research"] = research
+            await checkpoint(factory, job_id, token, snapshot=snapshot, usage=writer.usage)
+        elif snapshot.get("external_research"):
+            model_snapshot["external_research"] = snapshot["external_research"]
         await checkpoint(
             factory,
             job_id,
@@ -133,8 +154,9 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         candidate = (
             GeneratedDraft.model_validate(candidate_data)
             if candidate_data
-            else await writer.write(snapshot, evidence.model_dump())
+            else await writer.write(model_snapshot, evidence.model_dump())
         )
+        candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
         await checkpoint(
             factory,
             job_id,
@@ -143,23 +165,33 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             stage="check",
             usage=writer.usage,
         )
-        issues = validate_draft(candidate, snapshot["turns"])
-        check = await writer.check(snapshot, candidate)
+        issues = validate_draft(
+            candidate, model_snapshot["turns"], model_snapshot.get("external_research")
+        )
+        check = await writer.check(model_snapshot, candidate)
         if issues or check.serious_issues or check.style_issues:
             candidate = await writer.parse(
                 GeneratedDraft,
-                "Repair only the listed issues while preserving supported meaning and voice.",
+                "Repair only the listed issues while preserving supported meaning and voice. "
+                "If a claim, instruction, example, or quotation is unsupported, remove it or "
+                "rewrite it using only cited participant turns or verified public research. "
+                "Never retain unsupported advice merely to keep the article's length.",
                 {
-                    **snapshot,
+                    **model_snapshot,
                     "candidate": candidate.model_dump(),
                     "issues": issues + check.serious_issues + check.style_issues,
                 },
             )
+            candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
             await checkpoint(factory, job_id, token, candidate=candidate.model_dump())
-            check = await writer.check(snapshot, candidate)
-            if validate_draft(candidate, snapshot["turns"]) or check.serious_issues:
+            check = await writer.check(model_snapshot, candidate)
+            if validate_draft(
+                candidate, model_snapshot["turns"], model_snapshot.get("external_research")
+            ) or check.serious_issues:
                 raise ValueError("The draft could not pass source fidelity checks")
-        sections = editor_sections(candidate)
+        sections = editor_sections(
+            candidate, model_snapshot.get("external_research", {}).get("sources", [])
+        )
         async with factory.begin() as db:
             job = await db.scalar(
                 select(ConsultantGeneration)
@@ -185,33 +217,40 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             draft = await db.scalar(
                 select(ArticleDraft).where(ArticleDraft.article_id == article.id)
             )
-            # Initial generation may create the draft. Every subsequent run is a proposal.
+            base_version = snapshot.get("base_draft_updated_at")
+            if base_version and (
+                draft is None or draft.updated_at.isoformat() != base_version
+            ):
+                raise ValueError("The draft changed while this suggestion was generated")
+            # Keep one active draft and at most one pending rewrite proposal.
+            await db.execute(
+                delete(ConsultantDraftRevision).where(
+                    ConsultantDraftRevision.article_id == article.id
+                )
+            )
             if draft is None and snapshot.get("base_sections") is None:
                 db.add(ArticleDraft(article_id=article.id, sections=sections))
-            revision = ConsultantDraftRevision(
-                article_id=article.id,
-                generation_id=job.id,
-                kind="generated" if draft is None else "proposal",
-                sections=sections,
-                gaps=candidate.gaps,
-            )
-            db.add(revision)
-            p = await db.scalar(
-                select(ConsultantProfile)
-                .where(ConsultantProfile.user_id == article.user_id)
-                .with_for_update()
-            )
-            if p:
-                p.suggested_voice = evidence.voice.model_dump()
+            else:
+                db.add(
+                    ConsultantDraftRevision(
+                        article_id=article.id,
+                        generation_id=job.id,
+                        kind="proposal",
+                        sections=sections,
+                        gaps=candidate.gaps,
+                    )
+                )
             article.status = "in_review"
             job.state, job.stage, job.error = "succeeded", "complete", None
+            job.candidate = candidate.model_dump()
             job.usage = writer.usage
             job.lease_until, job.lease_token = None, None
         log.info("consultant_generation_completed job_id=%s model=%s", job_id, model)
     except Exception as exc:
-        transient = isinstance(exc, (APIConnectionError, APITimeoutError)) or (
-            isinstance(exc, APIStatusError) and (exc.status_code == 429 or exc.status_code >= 500)
-        )
+        rate_limited = isinstance(exc, APIStatusError) and exc.status_code == 429
+        transient = isinstance(
+            exc, (APIConnectionError, APITimeoutError, ModelOutputError, ValidationError)
+        ) or (isinstance(exc, APIStatusError) and (rate_limited or exc.status_code >= 500))
         async with factory.begin() as db:
             job = await db.scalar(
                 select(ConsultantGeneration)
@@ -220,7 +259,14 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             )
             if job and job.lease_token == token:
                 job.state = "queued" if transient and job.attempts < 3 else "failed"
-                job.error = "We couldn't finish this draft. Your interview is saved. Please retry."
+                job.error = (
+                    "Drafting is temporarily unavailable because the AI service rate limit was "
+                    "reached. Your interview is safe. Please retry shortly."
+                    if rate_limited
+                    else "Your draft changed while this suggestion was generated. Please try again."
+                    if "draft changed while" in str(exc).lower()
+                    else "We couldn't finish this draft. Your interview is saved. Please retry."
+                )
                 job.lease_until = (
                     datetime.now(UTC) + timedelta(seconds=15 * job.attempts)
                     if job.state == "queued"
@@ -229,6 +275,12 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 job.lease_token = None
                 if writer:
                     job.usage = writer.usage
+                if job.state == "failed":
+                    await db.execute(
+                        update(Article)
+                        .where(Article.id == job.article_id)
+                        .values(status="ready_to_draft")
+                    )
         # Never log provider request bodies or transcript-bearing exception text.
         log.warning(
             "consultant_generation_failed job_id=%s error_type=%s", job_id, type(exc).__name__
@@ -258,6 +310,13 @@ async def main() -> None:
         await engine.dispose()
 
 
+def run() -> None:
+    """Run the worker with an event loop supported by async Psycopg."""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(main())
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    run()

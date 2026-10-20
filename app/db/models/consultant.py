@@ -18,9 +18,6 @@ class ConsultantProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     specialty: Mapped[str] = mapped_column(String(500), default="")
     audience: Mapped[str] = mapped_column(String(500), default="")
     onboarding_complete: Mapped[bool] = mapped_column(default=False)
-    voice: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    voice_revision: Mapped[int] = mapped_column(Integer, default=0)
-    suggested_voice: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
 class ConsultantInterview(UUIDPrimaryKeyMixin, TimestampMixin, Base):

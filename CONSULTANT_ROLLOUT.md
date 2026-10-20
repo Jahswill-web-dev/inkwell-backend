@@ -18,7 +18,8 @@ replace manual edits. Worker logs contain IDs/error types, never transcript bodi
 The consultant flow uses OpenAI live audio independently of the marketing provider choice. It reuses
 the shared WebRTC hook and OpenAI live transport. The marketing ElevenLabs integration is unchanged.
 Raw audio is not stored by this implementation. Transcript corrections are kept separately from the
-original turns. Generation snapshots are immutable, including the exact approved voice revision.
+original turns. Generation snapshots are immutable. Writing style is inferred from the current
+interview and is not carried across articles in a reusable profile.
 
 ## Rollback
 

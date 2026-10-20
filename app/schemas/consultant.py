@@ -21,7 +21,7 @@ class ProfileInput(Input):
     audience: str = Field(default="", max_length=500)
 
 
-class VoiceProfile(Input):
+class InterviewVoiceEvidence(BaseModel):
     vocabulary: list[str] = Field(default_factory=list, max_length=30)
     explanation_patterns: str = Field(default="", max_length=2000)
     analogies: str = Field(default="", max_length=1000)
@@ -30,11 +30,6 @@ class VoiceProfile(Input):
     perspective: str = Field(default="", max_length=1000)
     avoid: list[str] = Field(default_factory=list, max_length=30)
     excerpts: list[str] = Field(default_factory=list, max_length=20)
-
-
-class VoiceUpdate(Input):
-    action: Literal["save", "approve", "dismiss", "reset"]
-    voice: VoiceProfile | None = None
 
 
 class ConsultantArticleInput(Input):
@@ -63,6 +58,11 @@ class GenerateInput(Input):
     instruction: Literal["initial", "clearer", "concise", "closer", "updated"] = "updated"
 
 
+class ArticleAIRequest(Input):
+    request_key: str = Field(min_length=1, max_length=120)
+    instruction: str = Field(min_length=3, max_length=1200)
+
+
 class TypedAnswer(Input):
     item_id: str = Field(min_length=1, max_length=190)
     text: str = Field(min_length=1, max_length=20000)
@@ -84,13 +84,14 @@ class Evidence(BaseModel):
     claims: list[Claim]
     outline: list[str]
     gaps: list[str]
-    voice: VoiceProfile
+    voice: InterviewVoiceEvidence
 
 
 class DraftParagraph(BaseModel):
     text: str
     source_turn_ids: list[str]
     direct_quotes: list[str]
+    external_source_ids: list[str] = Field(default_factory=list)
 
 
 class GeneratedSection(BaseModel):
@@ -102,6 +103,7 @@ class GeneratedDraft(BaseModel):
     title: str
     sections: list[GeneratedSection] = Field(min_length=1)
     gaps: list[str]
+    summary: str = ""
 
 
 class DraftCheck(BaseModel):

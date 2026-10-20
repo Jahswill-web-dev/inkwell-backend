@@ -117,6 +117,15 @@ def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClie
 def test_switch_is_idempotent_and_preserves_existing_article(consultant_client: TestClient) -> None:
     c = consultant_client
     h = register(c)
+    profile = c.get("/api/v1/consultant/profile", headers=h)
+    assert profile.status_code == 200
+    assert set(profile.json()) == {
+        "display_name",
+        "specialty",
+        "audience",
+        "onboarding_complete",
+    }
+    assert c.put("/api/v1/consultant/voice", headers=h, json={"action": "reset"}).status_code == 404
     aid, _ = setup_article(c, h)
     first = c.get("/api/v1/workspaces/current", headers=h).json()["id"]
     for experience in ["marketing", "consultant", "consultant"]:
@@ -130,7 +139,7 @@ def test_switch_is_idempotent_and_preserves_existing_article(consultant_client: 
     assert c.get(f"/api/v1/consultant/articles/{aid}", headers=h).status_code == 200
 
 
-def test_manual_edits_require_current_version_and_save_history(
+def test_manual_edits_require_current_version_and_keep_one_draft(
     consultant_client: TestClient,
 ) -> None:
     c = consultant_client
@@ -167,7 +176,9 @@ def test_manual_edits_require_current_version_and_save_history(
         ).status_code
         == 200
     )
-    assert len(c.get(path, headers=h).json()["revisions"]) >= 3
+    saved = c.get(path, headers=h).json()
+    assert saved["sections"][0]["title"] == "Clear ownership"
+    assert saved["revisions"] == []
 
 
 def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
@@ -263,6 +274,7 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     asyncio.run(process_and_recover())
     article_path = f"/api/v1/consultant/articles/{aid}"
     current = client.get(article_path, headers=h).json()
+    assert current["revisions"] == []
     edited = current["sections"]
     edited[0]["title"] = "My manual edit"
     assert (
@@ -273,12 +285,21 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
         ).status_code
         == 200
     )
-    assert (
-        client.post(
-            path + "/generate", headers=h, json={"request_key": "rewrite", "instruction": "closer"}
-        ).status_code
-        == 200
+    current = client.get(article_path, headers=h).json()
+    ai_path = article_path + "/ai-requests"
+    payload = {"request_key": "rewrite", "instruction": "Make the article more structured"}
+    assert client.post(ai_path, headers=h, json=payload).status_code == 409
+    requested = client.post(
+        ai_path,
+        headers={**h, "If-Unmodified-Since": current["draft_updated_at"]},
+        json=payload,
     )
+    assert requested.status_code == 200, requested.text
+    assert client.post(
+        ai_path,
+        headers={**h, "If-Unmodified-Since": current["draft_updated_at"]},
+        json=payload,
+    ).json()["id"] == requested.json()["id"]
 
     async def rewrite() -> None:
         engine = create_engine(client.app.state.settings)
@@ -293,4 +314,29 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     asyncio.run(rewrite())
     result = client.get(article_path, headers=h).json()
     assert result["sections"][0]["title"] == "My manual edit"
+    assert len(result["revisions"]) == 1
     assert result["revisions"][0]["kind"] == "proposal"
+    assert result["revisions"][0]["request"] == "Make the article more structured"
+    assert result["revisions"][0]["sources"] == []
+    assert client.delete(
+        article_path + f"/revisions/{result['revisions'][0]['id']}", headers=h
+    ).status_code == 200
+    assert client.get(article_path, headers=h).json()["revisions"] == []
+    second = client.post(
+        ai_path,
+        headers={**h, "If-Unmodified-Since": current["draft_updated_at"]},
+        json={**payload, "request_key": "rewrite-again"},
+    )
+    assert second.status_code == 200, second.text
+    asyncio.run(rewrite())
+    result = client.get(article_path, headers=h).json()
+    assert (
+        client.post(
+            article_path + f"/revisions/{result['revisions'][0]['id']}/apply",
+            headers={**h, "If-Unmodified-Since": result["draft_updated_at"]},
+        ).status_code
+        == 200
+    )
+    applied = client.get(article_path, headers=h).json()
+    assert applied["sections"][0]["title"] == "Ownership"
+    assert applied["revisions"] == []

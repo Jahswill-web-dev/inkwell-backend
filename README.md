@@ -7,8 +7,8 @@ validation, and infrastructure concerns remain separate as the application grows
 ## Experiences
 
 - **Content marketing:** clients, source collection, briefs, outlines, section drafting, and review.
-- **Consultant:** personal workspace, live or typed self-interview, automatic full-article drafting,
-  approved voice preferences, and explicit revision proposals.
+- **Consultant:** personal workspace, live or typed self-interview, automatic full-article drafting
+  based on the current interview, and explicit revision proposals.
 
 One account can enable both experiences. Consultant articles and interviews remain private to their
 owner, separate from marketing workspace membership. Existing accounts and articles default to marketing.
@@ -174,7 +174,15 @@ The development database will be available on port `5432` using the connection c
 uv run alembic upgrade head
 ```
 
-### 6. Start the API
+### 6. Start the API and background worker
+
+Local development uses two backend processes:
+
+- The **API** handles browser requests, authentication, interviews, and queues generation jobs.
+- The **consultant worker** picks up queued jobs and runs the understand, write, and check stages that
+  produce consultant drafts.
+
+Open two PowerShell terminals in the backend directory. Start the API in the first terminal:
 
 ```powershell
 uv run uvicorn app.main:app --reload
@@ -185,6 +193,32 @@ The API will be available at `http://127.0.0.1:8000`.
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - ReDoc: `http://127.0.0.1:8000/redoc`
 - OpenAPI schema: `http://127.0.0.1:8000/openapi.json`
+
+Start the consultant worker in the second terminal:
+
+```powershell
+uv run python -m app.workers.consultant
+```
+
+Keep both terminals running while using the consultant experience. The API can queue a draft without
+the worker, but the draft will remain in the `queued` state until a worker is running. The worker uses
+the same `.env` file and PostgreSQL database as the API, including `DATABASE_URL`, `OPENAI_API_KEY`,
+and the consultant model settings.
+
+If Windows Application Control blocks executables launched through `uv run`, invoke the project
+virtual environment directly instead:
+
+```powershell
+# Terminal 1: API
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+
+# Terminal 2: consultant worker
+.\.venv\Scripts\python.exe -m app.workers.consultant
+```
+
+When a consultant draft stays queued, first confirm that the second terminal is still running and
+has not reported a database, OpenAI credential, or rate-limit error. Starting the worker later will
+allow it to claim jobs that were already queued; the interview does not need to be repeated.
 
 ## Database Migrations
 
@@ -1657,9 +1691,8 @@ The generated [OpenAPI schema](http://127.0.0.1:8000/openapi.json) describes req
 | GET | `/availability` | Public feature availability: `{"enabled": true}` by default |
 | GET | `/experience` | Preferred `experience` and `enabled_experiences` |
 | PUT | `/experience` | Enable/select `marketing` or `consultant`; creates the workspace if needed |
-| GET | `/profile` | Display name, specialty, audience, onboarding flag, approved voice, voice revision, suggested voice |
+| GET | `/profile` | Display name, specialty, audience, and onboarding flag |
 | PUT | `/profile` | Save onboarding/profile fields and mark onboarding complete |
-| PUT | `/voice` | Save, approve, dismiss, or reset voice preferences |
 
 Registration at `POST /api/v1/auth/register` accepts optional `experience: "marketing" | "consultant"`
 alongside the existing registration fields. Omission retains the marketing default. User responses
@@ -1679,12 +1712,7 @@ Use that body for `PUT /experience`. Profile updates accept:
 ```
 
 Only `display_name` is required (1–120 characters); specialty and audience default to empty strings
-and allow up to 500 characters each. Voice updates accept `{"action":"approve"}`,
-`{"action":"dismiss"}`, `{"action":"reset"}`, or `{"action":"save","voice":{...}}`.
-The editable voice object contains `vocabulary`, `avoid`, and `excerpts` string arrays, plus
-`explanation_patterns`, `analogies`, `formality`, `rhythm`, and `perspective` strings. Saving or
-approving increments the approved revision. Suggestions never silently replace approved preferences.
-Older voice excerpts guide style only; they do not supply facts for a new article.
+and allow up to 500 characters each.
 
 ### Articles, interviews, and drafts
 
@@ -1763,8 +1791,9 @@ text, send `text: null` and `excluded: false`. A correction increments the trans
 
 `POST /finish` takes no body and is idempotent. Silence, pause, or disconnect does not finish an
 interview. Finalized interviews reject new turns; create a follow-up interview to add material.
-The snapshot includes corrected, non-excluded participant evidence, interview context, article
-settings, and the approved voice revision. The worker stores model/prompt metadata and stage results.
+The snapshot includes corrected, non-excluded participant evidence, interview context, and article
+settings. The worker extracts style evidence from that interview for the current article only and
+stores model/prompt metadata and stage results.
 
 Explicit regeneration uses a stable request key for retries:
 

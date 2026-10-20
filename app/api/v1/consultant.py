@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from openai import AsyncOpenAI
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.auth import CurrentUser
@@ -22,6 +22,7 @@ from app.db.models.workspace import Workspace, WorkspaceMember
 from app.db.session import get_db_session
 from app.prompts.consultant import INTERVIEW_POLICY, source_json
 from app.schemas.consultant import (
+    ArticleAIRequest,
     ArticleDetailsInput,
     ConsultantArticleInput,
     CorrectionsInput,
@@ -31,8 +32,6 @@ from app.schemas.consultant import (
     ProfileInput,
     TurnsInput,
     TypedAnswer,
-    VoiceProfile,
-    VoiceUpdate,
 )
 from app.schemas.draft import ArticleDraftUpdate
 from app.schemas.interview_transcript import TranscriptTurn
@@ -43,6 +42,16 @@ from app.services.openai_realtime import OpenAIRealtimeService
 
 router = APIRouter(prefix="/consultant", tags=["consultant"])
 DB = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+def _matches_version(value: str | None, current: datetime) -> bool:
+    if not value:
+        return False
+    try:
+        supplied = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return supplied == current
 
 
 @router.get("/availability")
@@ -78,9 +87,6 @@ async def get_profile(user: CurrentUser, db: DB) -> dict[str, Any]:
         "specialty": p.specialty,
         "audience": p.audience,
         "onboarding_complete": p.onboarding_complete,
-        "voice": p.voice,
-        "voice_revision": p.voice_revision,
-        "suggested_voice": p.suggested_voice,
     }
 
 
@@ -93,25 +99,6 @@ async def put_profile(
     for key, value in payload.model_dump().items():
         setattr(p, key, value)
     p.onboarding_complete = True
-    return {"saved": True}
-
-
-@router.put("/voice")
-async def put_voice(payload: VoiceUpdate, user: CurrentUser, db: DB) -> dict[str, bool]:
-    p = await svc.profile(db, user)
-    if payload.action == "save":
-        if payload.voice is None:
-            raise svc.fail("voice_required", "Provide voice preferences.", 422)
-        p.voice = payload.voice.model_dump()
-    elif payload.action == "approve":
-        if p.suggested_voice is None:
-            raise svc.fail("no_suggestion", "There is no voice suggestion to approve.")
-        p.voice = VoiceProfile.model_validate(p.suggested_voice).model_dump()
-    elif payload.action == "reset":
-        p.voice = {}
-    if payload.action != "dismiss":
-        p.voice_revision += 1
-    p.suggested_voice = None
     return {"saved": True}
 
 
@@ -179,10 +166,20 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
     revisions = (
         await db.scalars(
             select(ConsultantDraftRevision)
-            .where(ConsultantDraftRevision.article_id == a.id)
+            .where(
+                ConsultantDraftRevision.article_id == a.id,
+                ConsultantDraftRevision.kind == "proposal",
+            )
             .order_by(ConsultantDraftRevision.created_at.desc())
+            .limit(1)
         )
     ).all()
+    proposal_jobs: dict[UUID, ConsultantGeneration] = {}
+    for revision in revisions:
+        if revision.generation_id:
+            proposal_job = await db.get(ConsultantGeneration, revision.generation_id)
+            if proposal_job:
+                proposal_jobs[revision.id] = proposal_job
     draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
     return {
         "id": a.id,
@@ -200,6 +197,18 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
                 "sections": r.sections,
                 "gaps": r.gaps,
                 "created_at": r.created_at,
+                "request": (
+                    proposal_jobs[r.id].snapshot.get("instruction", "")
+                    if proposal_jobs.get(r.id) else ""
+                ),
+                "summary": (
+                    (proposal_jobs[r.id].candidate or {}).get("summary", "")
+                    if proposal_jobs.get(r.id) else ""
+                ),
+                "sources": (
+                    proposal_jobs[r.id].snapshot.get("external_research", {}).get("sources", [])
+                    if proposal_jobs.get(r.id) else []
+                ),
             }
             for r in revisions
         ],
@@ -346,6 +355,36 @@ async def regenerate(
     )
 
 
+@router.post("/articles/{article_id}/ai-requests")
+async def request_article_change(
+    article_id: UUID, payload: ArticleAIRequest, user: CurrentUser, db: DB, request: Request
+) -> dict[str, Any]:
+    article = await svc.owned_article(db, user.id, article_id, lock=True)
+    draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == article.id))
+    if draft is None:
+        raise svc.fail("draft_missing", "Create a draft before asking AI to change it.", 422)
+    if not _matches_version(request.headers.get("if-unmodified-since"), draft.updated_at):
+        raise svc.fail(
+            "draft_conflict", "This draft changed elsewhere. Reload before requesting a change."
+        )
+    interview = await db.scalar(
+        select(ConsultantInterview)
+        .where(
+            ConsultantInterview.article_id == article.id,
+            ConsultantInterview.state == "completed",
+        )
+        .order_by(ConsultantInterview.created_at.desc())
+    )
+    if interview is None:
+        raise svc.fail(
+            "interview_not_finished", "Finish an interview before asking AI to edit.", 422
+        )
+    return svc.job_response(await svc.enqueue(
+        db, user, interview, request.app.state.settings,
+        payload.request_key, payload.instruction,
+    ))
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry(job_id: UUID, user: CurrentUser, db: DB) -> dict[str, Any]:
     job = await db.scalar(
@@ -489,9 +528,9 @@ async def save_draft(
     a = await svc.owned_article(db, user.id, article_id, lock=True)
     draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
     expected = request.headers.get("if-unmodified-since")
-    if draft and expected != draft.updated_at.isoformat():
+    if draft and not _matches_version(expected, draft.updated_at):
         raise svc.fail("draft_conflict", "This draft changed elsewhere. Reload before saving.")
-    await svc.save_revision(db, a, [s.model_dump(mode="json") for s in payload.sections], "edited")
+    await svc.save_draft(db, a, [s.model_dump(mode="json") for s in payload.sections])
     return {"saved": True}
 
 
@@ -502,7 +541,9 @@ async def apply_revision(
     a = await svc.owned_article(db, user.id, article_id, lock=True)
     r = await db.scalar(
         select(ConsultantDraftRevision).where(
-            ConsultantDraftRevision.id == revision_id, ConsultantDraftRevision.article_id == a.id
+            ConsultantDraftRevision.id == revision_id,
+            ConsultantDraftRevision.article_id == a.id,
+            ConsultantDraftRevision.kind == "proposal",
         )
     )
     if not r:
@@ -523,10 +564,30 @@ async def apply_revision(
                 "The interview changed after this proposal. Generate an updated draft first.",
             )
     draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
-    if draft and request.headers.get("if-unmodified-since") != draft.updated_at.isoformat():
+    if draft and not _matches_version(request.headers.get("if-unmodified-since"), draft.updated_at):
         raise svc.fail("draft_conflict", "This draft changed elsewhere. Reload before applying.")
-    await svc.save_revision(db, a, r.sections, "accepted")
+    if r.generation_id and source_job:
+        base_version = source_job.snapshot.get("base_draft_updated_at")
+        if base_version and (draft is None or draft.updated_at.isoformat() != base_version):
+            raise svc.fail(
+                "stale_proposal",
+                "This draft changed after the suggestion was requested. Generate a new preview.",
+            )
+    await svc.save_draft(db, a, r.sections)
     return {"saved": True}
+
+
+@router.delete("/articles/{article_id}/revisions/{revision_id}")
+async def reject_revision(
+    article_id: UUID, revision_id: UUID, user: CurrentUser, db: DB
+) -> dict[str, bool]:
+    article = await svc.owned_article(db, user.id, article_id, lock=True)
+    await db.execute(delete(ConsultantDraftRevision).where(
+        ConsultantDraftRevision.id == revision_id,
+        ConsultantDraftRevision.article_id == article.id,
+        ConsultantDraftRevision.kind == "proposal",
+    ))
+    return {"rejected": True}
 
 
 @router.put("/articles/{article_id}/details")

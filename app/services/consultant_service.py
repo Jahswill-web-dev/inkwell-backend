@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -205,7 +205,6 @@ async def enqueue(
             "This interview is too long to draft safely. Exclude unrelated passages first.",
             422,
         )
-    voice = await profile(session, user)
     current = await session.scalar(
         select(ArticleDraft).where(ArticleDraft.article_id == article.id)
     )
@@ -219,10 +218,9 @@ async def enqueue(
         },
         "turns": turns,
         "transcript_revisions": revisions,
-        "voice": voice.voice,
-        "voice_revision": voice.voice_revision,
         "instruction": instruction,
         "base_sections": current.sections if current else None,
+        "base_draft_updated_at": current.updated_at.isoformat() if current else None,
     }
     job = ConsultantGeneration(
         article_id=article.id,
@@ -246,25 +244,21 @@ def job_response(job: ConsultantGeneration) -> dict[str, Any]:
         "error": job.error,
         "attempts": job.attempts,
         "created_at": job.created_at,
+        "instruction": job.snapshot.get("instruction", ""),
     }
 
 
-async def save_revision(
-    session: AsyncSession, article: Article, sections: list[dict[str, Any]], kind: str
+async def save_draft(
+    session: AsyncSession, article: Article, sections: list[dict[str, Any]]
 ) -> None:
     draft = await session.scalar(select(ArticleDraft).where(ArticleDraft.article_id == article.id))
     if draft is None:
         draft = ArticleDraft(article_id=article.id, sections=sections)
         session.add(draft)
     elif draft.sections != sections:
-        session.add(
-            ConsultantDraftRevision(
-                article_id=article.id, kind="previous", sections=draft.sections, gaps=[]
-            )
-        )
         draft.sections = sections
-    session.add(
-        ConsultantDraftRevision(article_id=article.id, kind=kind, sections=sections, gaps=[])
+    await session.execute(
+        delete(ConsultantDraftRevision).where(ConsultantDraftRevision.article_id == article.id)
     )
     article.status = "in_review"
     await session.flush()
