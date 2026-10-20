@@ -295,11 +295,14 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
         json=payload,
     )
     assert requested.status_code == 200, requested.text
-    assert client.post(
-        ai_path,
-        headers={**h, "If-Unmodified-Since": current["draft_updated_at"]},
-        json=payload,
-    ).json()["id"] == requested.json()["id"]
+    assert (
+        client.post(
+            ai_path,
+            headers={**h, "If-Unmodified-Since": current["draft_updated_at"]},
+            json=payload,
+        ).json()["id"]
+        == requested.json()["id"]
+    )
 
     async def rewrite() -> None:
         engine = create_engine(client.app.state.settings)
@@ -318,9 +321,12 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     assert result["revisions"][0]["kind"] == "proposal"
     assert result["revisions"][0]["request"] == "Make the article more structured"
     assert result["revisions"][0]["sources"] == []
-    assert client.delete(
-        article_path + f"/revisions/{result['revisions'][0]['id']}", headers=h
-    ).status_code == 200
+    assert (
+        client.delete(
+            article_path + f"/revisions/{result['revisions'][0]['id']}", headers=h
+        ).status_code
+        == 200
+    )
     assert client.get(article_path, headers=h).json()["revisions"] == []
     second = client.post(
         ai_path,
@@ -340,3 +346,87 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     applied = client.get(article_path, headers=h).json()
     assert applied["sections"][0]["title"] == "Ownership"
     assert applied["revisions"] == []
+
+
+def test_worker_shows_checker_objection_on_failed_article(
+    consultant_client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.schemas.consultant import DraftCheck, Evidence
+    from app.workers import consultant as worker
+
+    client = consultant_client
+    headers = register(client)
+    article_id, interview_id = setup_article(client, headers)
+    interview_path = f"/api/v1/consultant/interviews/{interview_id}"
+    client.post(
+        interview_path + "/transcript",
+        headers=headers,
+        json={
+            "turns": [
+                {
+                    "item_id": "one",
+                    "speaker": "participant",
+                    "text": "Fix the handoff before you buy another tool.",
+                }
+            ]
+        },
+    )
+    job_id = client.post(interview_path + "/finish", headers=headers).json()["id"]
+    objection = "The example is attributed to the consultant without interview evidence."
+
+    class FakeWriter:
+        def __init__(self, *args: object) -> None:
+            self.client = SimpleNamespace(close=AsyncMock())
+            self.usage = {"input_tokens": 0, "output_tokens": 0}
+
+        async def understand(self, snapshot: dict[str, Any]) -> Evidence:
+            return Evidence(argument="Fix handoffs", claims=[], outline=[], gaps=[], voice={})
+
+        async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+            return GeneratedDraft(
+                title="Handoffs",
+                sections=[
+                    {
+                        "heading": "Ownership",
+                        "paragraphs": [
+                            {
+                                "text": "Fix the handoff before you buy another tool.",
+                                "source_turn_ids": [snapshot["turns"][0]["item_id"]],
+                                "direct_quotes": [],
+                            }
+                        ],
+                    }
+                ],
+                gaps=[],
+            )
+
+        async def check(self, snapshot: dict[str, Any], draft: GeneratedDraft) -> DraftCheck:
+            return DraftCheck(serious_issues=[objection], style_issues=[])
+
+        async def parse(
+            self, schema: type[GeneratedDraft], task: str, source: dict[str, Any]
+        ) -> GeneratedDraft:
+            return GeneratedDraft.model_validate(source["candidate"])
+
+    monkeypatch.setattr(worker, "ConsultantWriter", FakeWriter)
+    monkeypatch.setattr(worker, "get_settings", lambda: client.app.state.settings)
+
+    async def run_worker() -> None:
+        engine = create_engine(client.app.state.settings)
+        factory = create_session_factory(engine)
+        try:
+            claimed = await worker.claim(factory)
+            assert claimed is not None
+            await worker.process(factory, *claimed)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run_worker())
+    article = client.get(f"/api/v1/consultant/articles/{article_id}", headers=headers).json()
+    assert article["job"]["id"] == job_id
+    assert article["job"]["state"] == "failed"
+    assert objection in article["job"]["error"]
+    assert objection not in caplog.text

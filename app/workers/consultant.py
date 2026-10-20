@@ -40,6 +40,29 @@ log = logging.getLogger(__name__)
 LEASE_SECONDS = 180
 
 
+class DraftSourceFidelityError(ValueError):
+    def __init__(self, issues: list[str]) -> None:
+        super().__init__("The draft could not pass source fidelity checks")
+        self.issues = issues
+
+
+def source_fidelity_message(issues: list[str]) -> str:
+    """Show bounded checker feedback to the article owner without logging draft text."""
+    cleaned = list(
+        dict.fromkeys(re.sub(r"\s+", " ", issue).strip()[:280] for issue in issues if issue.strip())
+    )[:4]
+    if not cleaned:
+        return (
+            "We couldn't verify this draft against your interview. "
+            "Your interview is saved. Please retry."
+        )
+    details = "\n".join(f"{index}. {issue}" for index, issue in enumerate(cleaned, 1))
+    return (
+        "We couldn't verify this draft against your interview. The draft checker flagged:\n"
+        f"{details}\nYour interview is saved. Please review these points before retrying."
+    )
+
+
 async def claim(factory: async_sessionmaker[AsyncSession]) -> tuple[UUID, str] | None:
     async with factory.begin() as db:
         now = datetime.now(UTC)
@@ -130,11 +153,14 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         )
         evidence = sanitize_evidence(evidence, model_snapshot["turns"])
         validate_evidence(evidence, model_snapshot["turns"])
-        needs_research = bool(re.search(
-            r"\b(source|sources|citations?|research|stud(?:y|ies)|statistics?|"
-            r"real.world|case stud(?:y|ies)|public example)\b",
-            str(snapshot.get("instruction", "")), re.IGNORECASE,
-        ))
+        needs_research = bool(
+            re.search(
+                r"\b(source|sources|citations?|research|stud(?:y|ies)|statistics?|"
+                r"real.world|case stud(?:y|ies)|public example)\b",
+                str(snapshot.get("instruction", "")),
+                re.IGNORECASE,
+            )
+        )
         if needs_research and "external_research" not in snapshot:
             await checkpoint(factory, job_id, token, stage="research", usage=writer.usage)
             research = await writer.research(model_snapshot)
@@ -185,10 +211,11 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
             await checkpoint(factory, job_id, token, candidate=candidate.model_dump())
             check = await writer.check(model_snapshot, candidate)
-            if validate_draft(
+            remaining_issues = validate_draft(
                 candidate, model_snapshot["turns"], model_snapshot.get("external_research")
-            ) or check.serious_issues:
-                raise ValueError("The draft could not pass source fidelity checks")
+            )
+            if remaining_issues or check.serious_issues:
+                raise DraftSourceFidelityError(remaining_issues + check.serious_issues)
         sections = editor_sections(
             candidate, model_snapshot.get("external_research", {}).get("sources", [])
         )
@@ -218,9 +245,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 select(ArticleDraft).where(ArticleDraft.article_id == article.id)
             )
             base_version = snapshot.get("base_draft_updated_at")
-            if base_version and (
-                draft is None or draft.updated_at.isoformat() != base_version
-            ):
+            if base_version and (draft is None or draft.updated_at.isoformat() != base_version):
                 raise ValueError("The draft changed while this suggestion was generated")
             # Keep one active draft and at most one pending rewrite proposal.
             await db.execute(
@@ -259,14 +284,21 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             )
             if job and job.lease_token == token:
                 job.state = "queued" if transient and job.attempts < 3 else "failed"
-                job.error = (
-                    "Drafting is temporarily unavailable because the AI service rate limit was "
-                    "reached. Your interview is safe. Please retry shortly."
-                    if rate_limited
-                    else "Your draft changed while this suggestion was generated. Please try again."
-                    if "draft changed while" in str(exc).lower()
-                    else "We couldn't finish this draft. Your interview is saved. Please retry."
-                )
+                if rate_limited:
+                    job.error = (
+                        "Drafting is temporarily unavailable because the AI service rate limit "
+                        "was reached. Your interview is safe. Please retry shortly."
+                    )
+                elif isinstance(exc, DraftSourceFidelityError):
+                    job.error = source_fidelity_message(exc.issues)
+                elif "draft changed while" in str(exc).lower():
+                    job.error = (
+                        "Your draft changed while this suggestion was generated. Please try again."
+                    )
+                else:
+                    job.error = (
+                        "We couldn't finish this draft. Your interview is saved. Please retry."
+                    )
                 job.lease_until = (
                     datetime.now(UTC) + timedelta(seconds=15 * job.attempts)
                     if job.state == "queued"
