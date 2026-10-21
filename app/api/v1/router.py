@@ -6,6 +6,7 @@ from app.api.v1 import (
     auth,
     clients,
     consultant,
+    consultant_performance,
     drafts,
     elevenlabs_webhooks,
     interview_invitations,
@@ -31,3 +32,4 @@ router.include_router(reviews.router)
 router.include_router(jobs.router)
 
 router.include_router(consultant.router)
+router.include_router(consultant_performance.router)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.schemas.interview_transcript import TranscriptTurn
 
@@ -106,9 +106,80 @@ class GeneratedDraft(BaseModel):
     summary: str = ""
 
 
+class DraftFinding(BaseModel):
+    severity: Literal["serious", "style"]
+    category: Literal[
+        "unsupported_fact",
+        "unsupported_public_fact",
+        "invented_experience",
+        "incorrect_quotation",
+        "changed_meaning",
+        "wording",
+        "readability",
+    ]
+    section_index: int = Field(ge=0)
+    paragraph_index: int | None = Field(default=None, ge=0)
+    explanation: str = Field(min_length=1, max_length=500)
+    source_turn_ids: list[str] = Field(default_factory=list)
+    external_source_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def accuracy_cannot_be_downgraded(self) -> DraftFinding:
+        if self.category not in {"wording", "readability"}:
+            self.severity = "serious"
+        return self
+
+
 class DraftCheck(BaseModel):
-    serious_issues: list[str]
-    style_issues: list[str]
+    findings: list[DraftFinding]
+
+    @property
+    def serious_issues(self) -> list[str]:
+        return [finding.explanation for finding in self.findings if finding.severity == "serious"]
+
+    @property
+    def style_issues(self) -> list[str]:
+        return [finding.explanation for finding in self.findings if finding.severity == "style"]
+
+
+class SectionRepair(BaseModel):
+    section_index: int = Field(ge=0)
+    section: GeneratedSection
+
+
+class SectionRepairs(BaseModel):
+    repairs: list[SectionRepair] = Field(min_length=1)
+
+
+class ArticleEditAction(BaseModel):
+    kind: Literal["text_edit", "addition", "section_move", "full_rewrite"]
+    target_section_id: str | None = None
+    destination_section_id: str | None = None
+    position: Literal["before", "after"] | None = None
+    instruction: str = Field(min_length=1, max_length=1200)
+
+
+class ArticleEditPlan(BaseModel):
+    actions: list[ArticleEditAction] = Field(default_factory=list)
+    clarification_question: str | None = Field(default=None, max_length=300)
+
+
+class ArticleSectionEdits(BaseModel):
+    repairs: list[SectionRepair]
+    summary: str = Field(default="", max_length=500)
+
+
+class ArticleFlowCheck(BaseModel):
+    findings: list[DraftFinding] = Field(default_factory=list)
+
+
+class ArticleTransitionEdit(BaseModel):
+    section_index: int = Field(ge=0)
+    paragraph: DraftParagraph
+
+
+class ArticleTransitionEdits(BaseModel):
+    edits: list[ArticleTransitionEdit] = Field(default_factory=list)
 
 
 def json_data(value: BaseModel) -> dict[str, Any]:

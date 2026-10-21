@@ -9,7 +9,14 @@ import pytest
 
 from app.prompts.consultant import WRITING_POLICY
 from app.schemas.auth import RegisterRequest
-from app.schemas.consultant import ConsultantArticleInput, Evidence, GeneratedDraft
+from app.schemas.consultant import (
+    ConsultantArticleInput,
+    DraftCheck,
+    DraftFinding,
+    Evidence,
+    GeneratedDraft,
+    SectionRepairs,
+)
 from app.schemas.draft import ArticleDraftUpdate
 from app.services.consultant_service import effective_turns
 from app.services.consultant_writer import (
@@ -225,3 +232,55 @@ def test_model_snapshot_uses_short_stable_ids_without_changing_source() -> None:
     assert [turn["item_id"] for turn in compact["turns"]] == ["t1", "t2"]
     assert "transcript_revisions" not in compact
     assert source["turns"] == TURNS
+
+
+async def test_checker_records_api_call_counts_and_tokens() -> None:
+    response = SimpleNamespace(
+        output_parsed=DraftCheck(findings=[]),
+        usage=SimpleNamespace(input_tokens=120, output_tokens=18),
+    )
+    parse = AsyncMock(return_value=response)
+    writer = object.__new__(ConsultantWriter)
+    writer.client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    writer.model = "test-model"
+    writer.usage = {"input_tokens": 0, "output_tokens": 0}
+
+    result = await writer.check({"turns": TURNS}, draft())
+
+    assert result.findings == []
+    assert writer.usage["api_call_counts"] == {"check_full": 1}
+    assert writer.usage["api_attempt_counts"] == {"check_full": 1}
+    assert writer.usage["input_tokens"] == 120
+    assert writer.usage["output_tokens"] == 18
+
+
+async def test_section_repair_sends_only_affected_content_and_nearby_context() -> None:
+    candidate = draft()
+    candidate.sections.append(
+        candidate.sections[0].model_copy(update={"heading": "Next steps"})
+    )
+    finding = DraftFinding(
+        severity="serious",
+        category="unsupported_fact",
+        section_index=0,
+        paragraph_index=0,
+        explanation="Unsupported claim.",
+        source_turn_ids=["a"],
+    )
+    writer = object.__new__(ConsultantWriter)
+    writer.parse = AsyncMock(return_value=SectionRepairs(repairs=[{
+        "section_index": 0,
+        "section": candidate.sections[0],
+    }]))
+
+    await writer.repair_sections(
+        {"turns": TURNS, "article": {"title": "Handoffs"}}, candidate, [finding]
+    )
+
+    payload = writer.parse.call_args.args[2]
+    assert len(payload["affected_sections"]) == 1
+    assert payload["affected_sections"][0]["section_index"] == 0
+    affected = payload["affected_sections"][0]
+    assert [turn["item_id"] for turn in affected["participant_turns"]] == ["a"]
+    assert affected["surrounding_sections"][0]["heading"] == "Next steps"
+    assert "candidate" not in payload

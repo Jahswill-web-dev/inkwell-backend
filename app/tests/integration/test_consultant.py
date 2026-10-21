@@ -11,7 +11,12 @@ from sqlalchemy import select
 
 from alembic import command
 from app.core.config import Settings
-from app.db.models.consultant import ConsultantGeneration
+from app.db.models.article_draft import ArticleDraft
+from app.db.models.consultant import (
+    ConsultantDraftRevision,
+    ConsultantGeneration,
+    ConsultantInterview,
+)
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.schemas.consultant import GeneratedDraft
@@ -181,6 +186,115 @@ def test_manual_edits_require_current_version_and_keep_one_draft(
     assert saved["revisions"] == []
 
 
+def test_proposal_approval_rejects_changed_interview_and_draft(
+    consultant_client: TestClient,
+) -> None:
+    client = consultant_client
+    headers = register(client)
+    article_id, interview_id = setup_article(client, headers)
+    article_path = f"/api/v1/consultant/articles/{article_id}"
+    sections = editor_sections(
+        GeneratedDraft(
+            title="Handoffs",
+            sections=[
+                {
+                    "heading": "Opening",
+                    "paragraphs": [
+                        {
+                            "text": "Give the next step one owner.",
+                            "source_turn_ids": ["t1"],
+                            "direct_quotes": [],
+                        }
+                    ],
+                }
+            ],
+            gaps=[],
+        )
+    )
+    assert (
+        client.put(
+            article_path + "/draft", headers=headers, json={"sections": sections}
+        ).status_code
+        == 200
+    )
+    version = client.get(article_path, headers=headers).json()["draft_updated_at"]
+
+    async def seed_proposal(key: str, interview_revision: int, base_version: str) -> str:
+        engine = create_engine(client.app.state.settings)
+        try:
+            async with create_session_factory(engine).begin() as db:
+                interview = await db.get(ConsultantInterview, UUID(interview_id))
+                assert interview is not None
+                interview.state = "completed"
+                job = ConsultantGeneration(
+                    article_id=UUID(article_id),
+                    interview_id=UUID(interview_id),
+                    request_key=key,
+                    state="succeeded",
+                    stage="complete",
+                    snapshot={
+                        "transcript_revisions": {interview_id: interview_revision},
+                        "base_draft_updated_at": base_version,
+                        "instruction": key,
+                    },
+                    model_id="test-model",
+                    prompt_version="test",
+                )
+                db.add(job)
+                await db.flush()
+                revision = ConsultantDraftRevision(
+                    article_id=UUID(article_id),
+                    generation_id=job.id,
+                    kind="proposal",
+                    sections=sections,
+                    gaps=[],
+                )
+                db.add(revision)
+                await db.flush()
+                return str(revision.id)
+        finally:
+            await engine.dispose()
+
+    first_id = asyncio.run(seed_proposal("first", 0, version))
+    correction = client.put(
+        f"/api/v1/consultant/interviews/{interview_id}/corrections",
+        headers=headers,
+        json={"corrections": {}},
+    )
+    assert correction.status_code == 200
+    stale_interview = client.post(
+        article_path + f"/revisions/{first_id}/apply",
+        headers={**headers, "If-Unmodified-Since": version},
+    )
+    assert stale_interview.status_code == 409
+    assert stale_interview.json()["error"]["code"] == "stale_proposal"
+
+    second_id = asyncio.run(seed_proposal("second", 1, version))
+
+    async def change_draft_without_deleting_proposal() -> None:
+        engine = create_engine(client.app.state.settings)
+        try:
+            async with create_session_factory(engine).begin() as db:
+                draft = await db.scalar(
+                    select(ArticleDraft).where(ArticleDraft.article_id == UUID(article_id))
+                )
+                assert draft is not None
+                updated = [dict(item) for item in draft.sections]
+                updated[0]["title"] = "Changed elsewhere"
+                draft.sections = updated
+        finally:
+            await engine.dispose()
+
+    asyncio.run(change_draft_without_deleting_proposal())
+    latest = client.get(article_path, headers=headers).json()["draft_updated_at"]
+    stale_draft = client.post(
+        article_path + f"/revisions/{second_id}/apply",
+        headers={**headers, "If-Unmodified-Since": latest},
+    )
+    assert stale_draft.status_code == 409
+    assert stale_draft.json()["error"]["code"] == "stale_proposal"
+
+
 def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     consultant_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -188,7 +302,12 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from app.schemas.consultant import DraftCheck, Evidence
+    from app.schemas.consultant import (
+        ArticleEditPlan,
+        ArticleSectionEdits,
+        DraftCheck,
+        Evidence,
+    )
     from app.workers import consultant as worker
 
     client = consultant_client
@@ -243,7 +362,41 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
             )
 
         async def check(self, snapshot: dict[str, Any], candidate: GeneratedDraft) -> DraftCheck:
-            return DraftCheck(serious_issues=[], style_issues=[])
+            return DraftCheck(findings=[])
+
+        async def plan_article_edit(self, source: dict[str, Any]) -> ArticleEditPlan:
+            return ArticleEditPlan(
+                actions=[
+                    {
+                        "kind": "text_edit",
+                        "target_section_id": source["outline"][0]["id"],
+                        "instruction": "Make the article more structured",
+                    }
+                ]
+            )
+
+        async def edit_article_sections(self, source: dict[str, Any]) -> ArticleSectionEdits:
+            return ArticleSectionEdits(
+                repairs=[
+                    {
+                        "section_index": source["targets"][0]["section_index"],
+                        "section": {
+                            "heading": "Ownership",
+                            "paragraphs": [
+                                {
+                                    "text": "I call this expensive confusion.",
+                                    "source_turn_ids": [source["participant_turns"][0]["item_id"]],
+                                    "direct_quotes": [],
+                                }
+                            ],
+                        },
+                    }
+                ],
+                summary="Improved structure.",
+            )
+
+        async def check_article_changes(self, source: dict[str, Any]) -> DraftCheck:
+            return DraftCheck(findings=[])
 
     monkeypatch.setattr(worker, "ConsultantWriter", FakeWriter)
     monkeypatch.setattr(worker, "get_settings", lambda: client.app.state.settings)
@@ -295,6 +448,20 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
         json=payload,
     )
     assert requested.status_code == 200, requested.text
+    assert requested.json()["stage"] == "plan"
+
+    async def inspect_reused_evidence() -> None:
+        engine = create_engine(client.app.state.settings)
+        try:
+            async with create_session_factory(engine)() as db:
+                original = await db.get(ConsultantGeneration, UUID(job_id))
+                rewrite_job = await db.get(ConsultantGeneration, UUID(requested.json()["id"]))
+                assert original is not None and rewrite_job is not None
+                assert rewrite_job.evidence == original.evidence
+        finally:
+            await engine.dispose()
+
+    asyncio.run(inspect_reused_evidence())
     assert (
         client.post(
             ai_path,
@@ -354,7 +521,7 @@ def test_worker_shows_checker_objection_on_failed_article(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from app.schemas.consultant import DraftCheck, Evidence
+    from app.schemas.consultant import DraftCheck, Evidence, SectionRepairs
     from app.workers import consultant as worker
 
     client = consultant_client
@@ -404,7 +571,35 @@ def test_worker_shows_checker_objection_on_failed_article(
             )
 
         async def check(self, snapshot: dict[str, Any], draft: GeneratedDraft) -> DraftCheck:
-            return DraftCheck(serious_issues=[objection], style_issues=[])
+            return DraftCheck(
+                findings=[
+                    {
+                        "severity": "serious",
+                        "category": "invented_experience",
+                        "section_index": 0,
+                        "paragraph_index": 0,
+                        "explanation": objection,
+                        "source_turn_ids": [snapshot["turns"][0]["item_id"]],
+                    }
+                ]
+            )
+
+        async def repair_sections(
+            self, snapshot: dict[str, Any], draft: GeneratedDraft, findings: list[Any]
+        ) -> SectionRepairs:
+            return SectionRepairs(
+                repairs=[
+                    {
+                        "section_index": 0,
+                        "section": draft.sections[0].model_dump(),
+                    }
+                ]
+            )
+
+        async def check_repaired_sections(
+            self, snapshot: dict[str, Any], draft: GeneratedDraft, indices: set[int]
+        ) -> DraftCheck:
+            return await self.check(snapshot, draft)
 
         async def parse(
             self, schema: type[GeneratedDraft], task: str, source: dict[str, Any]
@@ -430,3 +625,134 @@ def test_worker_shows_checker_objection_on_failed_article(
     assert article["job"]["state"] == "failed"
     assert objection in article["job"]["error"]
     assert objection not in caplog.text
+    retried = client.post(f"/api/v1/consultant/jobs/{job_id}/retry", headers=headers)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["state"] == "queued"
+    assert retried.json()["stage"] == "write"
+
+    async def inspect_retry() -> None:
+        engine = create_engine(client.app.state.settings)
+        try:
+            async with create_session_factory(engine)() as db:
+                job = await db.get(ConsultantGeneration, UUID(job_id))
+                assert job is not None
+                assert job.evidence is not None
+                assert job.candidate is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(inspect_retry())
+
+
+def test_initial_style_suggestion_saves_draft_without_repair(
+    consultant_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.schemas.consultant import DraftCheck, Evidence
+    from app.workers import consultant as worker
+
+    client = consultant_client
+    headers = register(client)
+    article_id, interview_id = setup_article(client, headers)
+    interview_path = f"/api/v1/consultant/interviews/{interview_id}"
+    client.post(
+        interview_path + "/transcript",
+        headers=headers,
+        json={
+            "turns": [
+                {
+                    "item_id": "one",
+                    "speaker": "participant",
+                    "text": "Fix the handoff before you buy another tool.",
+                }
+            ]
+        },
+    )
+    client.post(interview_path + "/finish", headers=headers)
+
+    class FakeWriter:
+        def __init__(self, *args: object) -> None:
+            self.client = SimpleNamespace(close=AsyncMock())
+            self.usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+
+        async def understand(self, snapshot: dict[str, Any]) -> Evidence:
+            return Evidence(argument="Fix handoffs", claims=[], outline=[], gaps=[], voice={})
+
+        async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+            return GeneratedDraft(
+                title="Handoffs",
+                sections=[
+                    {
+                        "heading": "Opening",
+                        "paragraphs": [
+                            {
+                                "text": "Fix the handoff before you buy another tool.",
+                                "source_turn_ids": [snapshot["turns"][0]["item_id"]],
+                                "direct_quotes": [],
+                            }
+                        ],
+                    }
+                ],
+                gaps=[],
+            )
+
+        async def check(self, snapshot: dict[str, Any], draft: GeneratedDraft) -> DraftCheck:
+            return DraftCheck(
+                findings=[
+                    {
+                        "severity": "style",
+                        "category": "wording",
+                        "section_index": 0,
+                        "paragraph_index": 0,
+                        "explanation": "Consider a shorter first sentence.",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(worker, "ConsultantWriter", FakeWriter)
+    monkeypatch.setattr(worker, "get_settings", lambda: client.app.state.settings)
+
+    async def run_worker() -> None:
+        engine = create_engine(client.app.state.settings)
+        factory = create_session_factory(engine)
+        try:
+            claimed = await worker.claim(factory)
+            assert claimed is not None
+            await worker.process(factory, *claimed)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run_worker())
+    article = client.get(f"/api/v1/consultant/articles/{article_id}", headers=headers).json()
+    assert article["job"]["state"] == "succeeded"
+    assert article["sections"][0]["title"] == "Opening"
+    assert article["job"]["writing_suggestions"] == [
+        {
+            "section": "Opening",
+            "text": "Consider a shorter first sentence.",
+        }
+    ]
+
+    async def inspect_metrics() -> None:
+        engine = create_engine(client.app.state.settings)
+        try:
+            async with create_session_factory(engine)() as db:
+                job = await db.scalar(
+                    select(ConsultantGeneration).where(
+                        ConsultantGeneration.article_id == UUID(article_id)
+                    )
+                )
+                assert job is not None
+                assert set(job.usage["stage_seconds"]) >= {
+                    "understand",
+                    "write",
+                    "check_full",
+                    "total",
+                }
+                assert "repair_sections" not in job.usage["stage_seconds"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(inspect_metrics())

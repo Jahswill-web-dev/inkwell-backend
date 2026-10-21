@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.db.models.article_draft import ArticleDraft
 from app.db.models.consultant import (
     ConsultantDraftRevision,
     ConsultantGeneration,
+    ConsultantGenerationEvent,
     ConsultantInterview,
     ConsultantProfile,
 )
@@ -161,6 +163,7 @@ async def enqueue(
     settings: Settings,
     request_key: str,
     instruction: str = "initial",
+    request_kind: str = "generation",
 ) -> ConsultantGeneration:
     article = await owned_article(session, user.id, interview.article_id, lock=True)
     existing = await session.scalar(
@@ -219,9 +222,36 @@ async def enqueue(
         "turns": turns,
         "transcript_revisions": revisions,
         "instruction": instruction,
+        "request_kind": request_kind,
         "base_sections": current.sections if current else None,
         "base_draft_updated_at": current.updated_at.isoformat() if current else None,
     }
+    # A rewrite of the same interview does not need to extract its evidence again.
+    # Match the source and writing policy, so corrections or a new interview force
+    # a fresh extraction.
+    previous_jobs = (
+        await session.scalars(
+            select(ConsultantGeneration)
+            .where(
+                ConsultantGeneration.article_id == article.id,
+                ConsultantGeneration.state == "succeeded",
+                ConsultantGeneration.model_id == settings.consultant_model,
+                ConsultantGeneration.prompt_version == PROMPT_VERSION,
+                ConsultantGeneration.evidence.is_not(None),
+            )
+            .order_by(ConsultantGeneration.created_at.desc())
+        )
+    ).all()
+    reusable_evidence = next(
+        (
+            previous.evidence
+            for previous in previous_jobs
+            if previous.snapshot.get("turns") == turns
+            and previous.snapshot.get("article") == snapshot["article"]
+            and previous.snapshot.get("transcript_revisions") == revisions
+        ),
+        None,
+    )
     job = ConsultantGeneration(
         article_id=article.id,
         interview_id=interview.id,
@@ -229,14 +259,44 @@ async def enqueue(
         snapshot=snapshot,
         model_id=settings.consultant_model,
         prompt_version=PROMPT_VERSION,
+        evidence=reusable_evidence,
+        stage=(
+            "plan" if request_kind == "ask_ai" else "write" if reusable_evidence else "understand"
+        ),
     )
     session.add(job)
     article.status = "ready_to_draft"
     await session.flush()
+    session.add(
+        ConsultantGenerationEvent(
+            generation_id=job.id,
+            attempt=0,
+            kind="queue",
+            started_at=job.created_at or datetime.now(UTC),
+            outcome="running",
+        )
+    )
     return job
 
 
 def job_response(job: ConsultantGeneration) -> dict[str, Any]:
+    candidate = job.candidate or {}
+    suggestions = []
+    if job.state == "succeeded" and job.snapshot.get("base_sections") is None:
+        seen: set[tuple[str, str]] = set()
+        sections = candidate.get("sections", [])
+        for finding in candidate.get("review_suggestions", []):
+            index = finding.get("section_index", -1)
+            if finding.get("severity") != "style" or not 0 <= index < len(sections):
+                continue
+            heading = sections[index].get("heading", "Article")
+            explanation = finding.get("explanation", "").strip()
+            key = (heading, explanation)
+            if explanation and key not in seen:
+                suggestions.append({"section": heading, "text": explanation})
+                seen.add(key)
+            if len(suggestions) == 3:
+                break
     return {
         "id": job.id,
         "state": job.state,
@@ -245,6 +305,11 @@ def job_response(job: ConsultantGeneration) -> dict[str, Any]:
         "attempts": job.attempts,
         "created_at": job.created_at,
         "instruction": job.snapshot.get("instruction", ""),
+        "request_kind": job.snapshot.get("request_kind", "generation"),
+        "writing_suggestions": suggestions,
+        "clarification_question": (
+            candidate.get("clarification_question") if job.state == "needs_clarification" else None
+        ),
     }
 
 

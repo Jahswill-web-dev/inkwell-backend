@@ -1672,6 +1672,14 @@ The worker uses PostgreSQL jobs, atomic claiming, renewable leases, stage checkp
 transient retries. No Redis or broker is required. Jobs continue after the browser closes. Without
 this process, jobs remain queued. Configure the OpenAI key on **both** API and worker services.
 
+The private consultant generation-performance page is `/consultant/performance`. Set
+`GENERATION_PERFORMANCE_OWNER_EMAIL` to the same existing sign-in email in both backend and
+frontend server environments, then restart them. The backend checks the authenticated account on
+every performance API request; an unset value denies everyone. The owner sees jobs across all
+consultant accounts. The page is absent from other accounts' navigation, and direct requests are
+forbidden. Run the latest Alembic migration and restart the worker to record new timelines.
+Historical jobs retain any `usage` totals but correctly say “Detailed timing unavailable.”
+
 `CONSULTANT_ENABLED` defaults to true, so the signup option appears without extra configuration.
 Setting it to false stops new consultant signup/workspace enablement while preserving
 access to existing consultant work. Do not delete records or downgrade to roll back the UI rollout.

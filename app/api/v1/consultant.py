@@ -381,7 +381,7 @@ async def request_article_change(
         )
     return svc.job_response(await svc.enqueue(
         db, user, interview, request.app.state.settings,
-        payload.request_key, payload.instruction,
+        payload.request_key, payload.instruction, request_kind="ask_ai",
     ))
 
 
@@ -403,6 +403,13 @@ async def retry(job_id: UUID, user: CurrentUser, db: DB) -> dict[str, Any]:
         if running:
             raise svc.fail("generation_running", "Another draft is being generated.")
         job.state, job.error, job.attempts = "queued", None, 0
+        # A fidelity failure has already rejected this candidate. Regenerate it
+        # from the saved evidence instead of checking the same draft again.
+        job.candidate = None
+        job.stage = (
+            "plan" if job.snapshot.get("request_kind") == "ask_ai"
+            else "write" if job.evidence else "understand"
+        )
     return svc.job_response(job)
 
 

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,6 +36,8 @@ class ConsultantGeneration(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "consultant_generations"
     __table_args__ = (
         UniqueConstraint("article_id", "request_key", name="uq_consultant_generation_request"),
+        Index("ix_consultant_generations_created_at", "created_at"),
+        Index("ix_consultant_generations_model_created", "model_id", "created_at"),
     )
     article_id: Mapped[UUID] = mapped_column(
         ForeignKey("articles.id", ondelete="CASCADE"), index=True
@@ -69,3 +71,26 @@ class ConsultantDraftRevision(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(24))
     sections: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     gaps: Mapped[list[str]] = mapped_column(JSONB, default=list)
+
+
+class ConsultantGenerationEvent(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "consultant_generation_events"
+    __table_args__ = (
+        Index("ix_consultant_generation_events_job_time", "generation_id", "started_at"),
+        Index("ix_consultant_generation_events_kind_time", "kind", "started_at"),
+    )
+
+    generation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("consultant_generations.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    operation: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    model_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(24), nullable=False, default="running")
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128))

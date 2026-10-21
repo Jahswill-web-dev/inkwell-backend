@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     consultant_enabled: bool = True
     consultant_model: str = "gpt-5.6-sol"
     consultant_request_timeout_seconds: float = 120
+    generation_performance_owner_email: str | None = None
 
     vertex_project_id: str | None = None
     vertex_location: str = "global"
