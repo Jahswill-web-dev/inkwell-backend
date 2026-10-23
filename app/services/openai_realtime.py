@@ -5,13 +5,27 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
+from uuid import UUID
 
 from openai import AsyncOpenAI
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.db.models.consultant import ConsultantInterview
+from app.db.models.interview_transcript import InterviewTranscript
+from app.db.models.voice_session import VoiceSession
 from app.schemas.interview_invitation import GuestInterviewResponse
 from app.schemas.interview_transcript import TranscriptTurn
+from app.services.consultant_interview_orchestrator import (
+    ConsultantInterviewOrchestrator,
+    VoicePhase,
+    direction_prompt,
+    initial_phase,
+    opening_prompt,
+    resume_prompt,
+)
 from app.services.interview_context import ConsultantVoiceContext
 
 logger = logging.getLogger(__name__)
@@ -21,6 +35,12 @@ logger = logging.getLogger(__name__)
 class OpenAICallResult:
     sdp: str
     external_session_id: str
+
+
+@dataclass(frozen=True)
+class ConsultantVoiceControl:
+    interview_id: UUID
+    session_factory: async_sessionmaker[AsyncSession]
 
 
 END_INTERVIEW_TOOL: dict[str, Any] = {
@@ -204,6 +224,7 @@ class OpenAIRealtimeService:
         self._model = settings.openai_live_model
         self._workflow_model = settings.openai_interview_question_model
         self._reasoning_effort = settings.openai_reasoning_effort
+        self._settings = settings
 
     async def create_call(
         self,
@@ -211,7 +232,30 @@ class OpenAIRealtimeService:
         sdp: str,
         interview: GuestInterviewResponse | ConsultantVoiceContext,
         previous_turns: list[TranscriptTurn] | None = None,
+        consultant_control: ConsultantVoiceControl | None = None,
     ) -> OpenAICallResult:
+        consultant_orchestrated = (
+            isinstance(interview, ConsultantVoiceContext)
+            and consultant_control is not None
+            and self._settings.consultant_phase_orchestrator_enabled
+        )
+        delegation: dict[str, Any]
+        if consultant_orchestrated:
+            delegation = {"type": "client"}
+        else:
+            delegation = {
+                "type": "responses",
+                "responses": {
+                    "model": self._workflow_model,
+                    "reasoning": {"effort": self._reasoning_effort},
+                    "instructions": build_interview_workflow_instructions(
+                        interview, previous_turns
+                    ),
+                    "tools": [END_INTERVIEW_TOOL],
+                    "tool_choice": "auto",
+                    "parallel_tool_calls": False,
+                },
+            }
         try:
             response = await self._client.live.create(
                 session=cast(
@@ -220,19 +264,12 @@ class OpenAIRealtimeService:
                         "model": self._model,
                         "instructions": build_live_voice_instructions(interview, previous_turns),
                         "store": False,
-                        "delegation": {
-                            "type": "responses",
-                            "responses": {
-                                "model": self._workflow_model,
-                                "reasoning": {"effort": self._reasoning_effort},
-                                "instructions": build_interview_workflow_instructions(
-                                    interview, previous_turns
-                                ),
-                                "tools": [END_INTERVIEW_TOOL],
-                                "tool_choice": "auto",
-                                "parallel_tool_calls": False,
-                            },
-                        },
+                        "delegation": delegation,
+                        **(
+                            {"tools": [END_INTERVIEW_TOOL], "tool_choice": "auto"}
+                            if consultant_orchestrated
+                            else {}
+                        ),
                     },
                 ),
                 transport=cast(Any, {"type": "webrtc", "sdp": sdp}),
@@ -244,7 +281,19 @@ class OpenAIRealtimeService:
                 message="Unable to start the voice interview. Please try again.",
             ) from exc
 
-        start_live_sideband_controller(self._client, response.session.id)
+        if consultant_orchestrated:
+            assert isinstance(interview, ConsultantVoiceContext)
+            assert consultant_control is not None
+            start_consultant_sideband_controller(
+                self._client,
+                response.session.id,
+                interview,
+                consultant_control,
+                self._settings,
+                previous_turns or [],
+            )
+        else:
+            start_live_sideband_controller(self._client, response.session.id)
         return OpenAICallResult(
             sdp=response.transport.sdp,
             external_session_id=response.session.id,
@@ -252,6 +301,311 @@ class OpenAIRealtimeService:
 
 
 _sideband_tasks: set[asyncio.Task[None]] = set()
+
+
+def _event_payload(event: object) -> dict[str, Any]:
+    if isinstance(event, dict):
+        return event
+    dump = getattr(event, "model_dump", None)
+    if callable(dump):
+        value = dump()
+        return value if isinstance(value, dict) else {}
+    value = getattr(event, "__dict__", {})
+    return value if isinstance(value, dict) else {}
+
+
+def start_consultant_sideband_controller(
+    client: AsyncOpenAI,
+    session_id: str,
+    context: ConsultantVoiceContext,
+    control: ConsultantVoiceControl,
+    settings: Settings,
+    previous_turns: list[TranscriptTurn],
+) -> None:
+    task = asyncio.create_task(
+        _run_consultant_sideband_controller(
+            client, session_id, context, control, settings, previous_turns
+        )
+    )
+    _sideband_tasks.add(task)
+    task.add_done_callback(_sideband_tasks.discard)
+
+
+async def _load_consultant_phase(
+    control: ConsultantVoiceControl,
+    previous_turns: list[TranscriptTurn],
+    context: ConsultantVoiceContext,
+) -> tuple[VoicePhase, dict[str, Any]]:
+    async with control.session_factory.begin() as db:
+        interview = await db.scalar(
+            select(ConsultantInterview)
+            .where(ConsultantInterview.id == control.interview_id)
+            .with_for_update()
+        )
+        if interview is None:
+            raise RuntimeError("Consultant interview no longer exists")
+        phase = initial_phase(bool(previous_turns), interview.voice_phase)
+        state = dict(interview.voice_state or {})
+        if interview.voice_phase is None:
+            interview.voice_phase = phase
+            if phase == "awaiting_direction_confirmation":
+                state["legacy_direction_reconfirmation"] = True
+                state["version"] = int(state.get("version", 0)) + 1
+        if phase == "awaiting_direction_confirmation" and not state.get("tentative_direction"):
+            state["tentative_direction"] = direction_prompt(context)
+        interview.voice_state = state
+        return phase, state
+
+
+async def _save_consultant_decision(
+    client: AsyncOpenAI,
+    control: ConsultantVoiceControl,
+    session_id: str,
+    context: ConsultantVoiceContext,
+    settings: Settings,
+    participant_text: str,
+    delegation_id: str,
+    participant_item_id: str | None,
+) -> tuple[str, str, str | None] | None:
+    async with control.session_factory.begin() as db:
+        interview = await db.scalar(
+            select(ConsultantInterview)
+            .where(ConsultantInterview.id == control.interview_id)
+            .with_for_update()
+        )
+        if interview is None:
+            raise RuntimeError("Consultant interview no longer exists")
+        latest_session = await db.scalar(
+            select(VoiceSession)
+            .where(
+                VoiceSession.consultant_interview_id == interview.id,
+                VoiceSession.status == "connected",
+            )
+            .order_by(VoiceSession.started_at.desc())
+            .limit(1)
+        )
+        if latest_session is None or latest_session.external_session_id != session_id:
+            raise RuntimeError("This consultant voice session is no longer active")
+        transcript = await db.scalar(
+            select(InterviewTranscript).where(
+                InterviewTranscript.consultant_interview_id == interview.id
+            )
+        )
+        if transcript is None:
+            transcript = InterviewTranscript(
+                consultant_interview_id=interview.id,
+                turns=[],
+            )
+            db.add(transcript)
+            await db.flush()
+        if participant_item_id and not any(
+            turn.get("item_id") == participant_item_id for turn in transcript.turns
+        ):
+            transcript.turns = [
+                *transcript.turns,
+                {
+                    "item_id": participant_item_id,
+                    "speaker": "participant",
+                    "text": participant_text,
+                    "provider": "openai_live",
+                },
+            ]
+        turns = list(transcript.turns if transcript else [])
+        phase = initial_phase(bool(turns), interview.voice_phase)
+        state = dict(interview.voice_state or {})
+        processed = [str(value) for value in state.get("processed_delegation_ids", [])]
+        if delegation_id in processed:
+            logger.info(
+                "consultant_voice_duplicate_event_suppressed interview_id=%s delegation_id=%s",
+                interview.id,
+                delegation_id,
+            )
+            return None
+        orchestrator = ConsultantInterviewOrchestrator(settings, client)
+        approved = await orchestrator.decide(
+            phase=phase,
+            state=state,
+            context=context,
+            turns=turns,
+            participant_text=participant_text,
+        )
+        interview.voice_phase = approved.phase
+        approved.state["processed_delegation_ids"] = [*processed, delegation_id][-50:]
+        interview.voice_state = approved.state
+        logger.info(
+            "consultant_voice_phase_transition interview_id=%s from_phase=%s to_phase=%s action=%s",
+            interview.id,
+            phase,
+            approved.phase,
+            approved.decision.action,
+        )
+        if approved.phase == "completed":
+            logger.info(
+                "consultant_voice_completion_approved interview_id=%s reason=%s",
+                interview.id,
+                approved.decision.finish_reason,
+            )
+        return (
+            approved.decision.spoken_text,
+            approved.phase,
+            approved.decision.finish_reason,
+        )
+
+
+async def _run_consultant_sideband_controller(
+    client: AsyncOpenAI,
+    session_id: str,
+    context: ConsultantVoiceContext,
+    control: ConsultantVoiceControl,
+    settings: Settings,
+    previous_turns: list[TranscriptTurn],
+) -> None:
+    input_fragments: list[str] = []
+    input_item_ids: list[str] = []
+    delegation_tasks: set[asyncio.Task[None]] = set()
+    seen_delegation_ids: set[str] = set()
+    decision_lock = asyncio.Lock()
+
+    async def respond(connection: Any, delegation_id: str) -> None:
+        # Transcript fragments and delegation events are independent streams. Wait until the
+        # transcript has been stable for two checks, with a short upper bound for responsiveness.
+        prior_length = -1
+        stable_checks = 0
+        for _ in range(10):
+            await asyncio.sleep(0.1)
+            current_length = sum(len(fragment) for fragment in input_fragments)
+            if current_length > 0 and current_length == prior_length:
+                stable_checks += 1
+                if stable_checks >= 2:
+                    break
+            else:
+                stable_checks = 0
+            prior_length = current_length
+        async with decision_lock:
+            participant_text = "".join(input_fragments).strip()
+            participant_item_id = input_item_ids[-1] if input_item_ids else None
+            input_fragments.clear()
+            input_item_ids.clear()
+            if not participant_text:
+                await connection.send(
+                    {
+                        "type": "session.commentary.append",
+                        "event_id": f"consultant-retry-{delegation_id}",
+                        "delegation_id": delegation_id,
+                        "content": "I didn't catch that clearly. Could you please say it again?",
+                    }
+                )
+                return
+            try:
+                result = await _save_consultant_decision(
+                    client,
+                    control,
+                    session_id,
+                    context,
+                    settings,
+                    participant_text,
+                    delegation_id,
+                    participant_item_id,
+                )
+            except Exception:
+                logger.exception(
+                    "consultant_voice_turn_failed",
+                    extra={
+                        "session_id": session_id,
+                        "interview_id": str(control.interview_id),
+                    },
+                )
+                await connection.send(
+                    {
+                        "type": "session.commentary.append",
+                        "event_id": f"consultant-retry-{delegation_id}",
+                        "delegation_id": delegation_id,
+                        "content": (
+                            "I had trouble processing that response. Could you please say it "
+                            "again?"
+                        ),
+                    }
+                )
+                return
+        if result is None:
+            return
+        spoken, next_phase, finish_reason = result
+        if next_phase == "completed":
+            await connection.send(
+                {
+                    "type": "session.instructions.append",
+                    "event_id": f"consultant-complete-{delegation_id}",
+                    "delegation_id": delegation_id,
+                    "content": (
+                        "Backend completion is approved. Say the supplied closing message, "
+                        f"then call end_interview with reason {finish_reason}."
+                    ),
+                }
+            )
+        await connection.send(
+            {
+                "type": "session.commentary.append",
+                "event_id": f"consultant-reply-{delegation_id}",
+                "delegation_id": delegation_id,
+                "content": spoken,
+            }
+        )
+
+    try:
+        phase, state = await _load_consultant_phase(control, previous_turns, context)
+        if previous_turns or phase != "awaiting_readiness":
+            logger.info(
+                "consultant_voice_reconnect_recovery interview_id=%s phase=%s",
+                control.interview_id,
+                phase,
+            )
+        async with client.live.sideband.connect(session_id=session_id) as connection:
+            resumed = bool(previous_turns) or phase != "awaiting_readiness"
+            initial = resume_prompt(phase, context, state) if resumed else opening_prompt(context)
+            await connection.send(
+                {
+                    "type": "session.commentary.append",
+                    "event_id": f"consultant-opening-{session_id}",
+                    "delegation_id": None,
+                    "content": initial,
+                }
+            )
+            async for event in connection:
+                payload = _event_payload(event)
+                event_type = payload.get("type") or getattr(event, "type", None)
+                if event_type == "session.closed":
+                    for task in delegation_tasks:
+                        task.cancel()
+                    return
+                if event_type == "session.input_transcript.delta":
+                    delta = payload.get("delta") or getattr(event, "delta", "")
+                    if isinstance(delta, str):
+                        input_fragments.append(delta)
+                    item_id = payload.get("item_id") or getattr(event, "item_id", None)
+                    if isinstance(item_id, str) and item_id:
+                        input_item_ids.append(item_id)
+                    continue
+                if event_type != "session.delegation.created":
+                    continue
+                delegation = payload.get("delegation", {})
+                delegation_id = delegation.get("id") if isinstance(delegation, dict) else None
+                if not isinstance(delegation_id, str):
+                    continue
+                if delegation_id in seen_delegation_ids:
+                    logger.info(
+                        "consultant_voice_duplicate_event_suppressed session_id=%s",
+                        session_id,
+                    )
+                    continue
+                seen_delegation_ids.add(delegation_id)
+                task = asyncio.create_task(respond(connection, delegation_id))
+                delegation_tasks.add(task)
+                task.add_done_callback(delegation_tasks.discard)
+    except Exception:
+        logger.exception(
+            "Consultant sideband controller stopped",
+            extra={"session_id": session_id, "interview_id": str(control.interview_id)},
+        )
 
 
 def start_live_sideband_controller(client: AsyncOpenAI, session_id: str) -> None:

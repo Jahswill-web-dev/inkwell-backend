@@ -59,9 +59,35 @@ class TypedAnswer(Input):
     skip: bool = False
 
 
+class VoiceCompletionApproval(Input):
+    reason: Literal["participant_finished", "questions_complete"]
+
+
 class NextQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     complete: bool
+
+
+class ConsultantTurnDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal[
+        "ask_readiness",
+        "present_direction",
+        "ask_direction_confirmation",
+        "ask_framing",
+        "ask_adaptive",
+        "clarify",
+        "ask_final_contribution",
+        "present_recap",
+        "finish",
+    ]
+    spoken_text: str = Field(min_length=1, max_length=2000)
+    covered_goal_ids: list[str] = Field(default_factory=list, max_length=20)
+    goal_id: str | None = None
+    source_turn_ids: list[str] = Field(default_factory=list, max_length=24)
+    ambiguous_phrase: str | None = Field(default=None, max_length=500)
+    finish_reason: Literal["participant_finished", "questions_complete"] | None = None
 
 
 class DraftParagraph(BaseModel):

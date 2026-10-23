@@ -36,6 +36,8 @@ class ConsultantInterview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     state: Mapped[str] = mapped_column(String(24), default="active")
+    voice_phase: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    voice_state: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     questions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     corrections: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     revision: Mapped[int] = mapped_column(Integer, default=0)

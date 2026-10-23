@@ -13,6 +13,7 @@ from app.schemas.interview_transcript import TranscriptTurn
 from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import (
     END_INTERVIEW_TOOL,
+    ConsultantVoiceControl,
     OpenAIRealtimeService,
     _end_interview_tool_output,
     _run_live_sideband_controller,
@@ -153,7 +154,8 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
     compact_delivery = " ".join(delivery.split())
     compact_workflow = " ".join(workflow.split())
 
-    assert "Let the delegated interview workflow decide" in compact_delivery
+    assert "Speak only the application-approved commentary" in compact_delivery
+    assert "must not replace its question" in compact_delivery
     assert "Follow these phases in order" not in delivery
     assert "greet the consultant by name" in compact_workflow
     assert (
@@ -290,6 +292,7 @@ async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
     service._model = "gpt-live-1"
     service._workflow_model = "gpt-5.6-sol"
     service._reasoning_effort = "medium"
+    service._settings = SimpleNamespace(consultant_phase_orchestrator_enabled=True)
     interview = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", [], [])
 
     with patch("app.services.openai_realtime.start_live_sideband_controller"):
@@ -300,3 +303,31 @@ async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
     assert session["model"] == "gpt-live-1"
     assert session["delegation"]["responses"]["model"] == "gpt-5.6-sol"
     assert session["delegation"]["responses"]["reasoning"] == {"effort": "medium"}
+
+
+async def test_consultant_phase_control_uses_client_delegation() -> None:
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            session=SimpleNamespace(id="live-session"),
+            transport=SimpleNamespace(sdp="answer-sdp"),
+        )
+    )
+    service = object.__new__(OpenAIRealtimeService)
+    service._client = SimpleNamespace(live=SimpleNamespace(create=create))
+    service._model = "gpt-live-1"
+    service._workflow_model = "gpt-5.6-sol"
+    service._reasoning_effort = "medium"
+    service._settings = SimpleNamespace(consultant_phase_orchestrator_enabled=True)
+    interview = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", [], [])
+    control = ConsultantVoiceControl(uuid4(), SimpleNamespace())  # type: ignore[arg-type]
+
+    with patch("app.services.openai_realtime.start_consultant_sideband_controller") as start:
+        await service.create_call(
+            sdp="offer-sdp", interview=interview, consultant_control=control
+        )
+
+    session = create.await_args.kwargs["session"]
+    assert session["model"] == "gpt-live-1"
+    assert session["delegation"] == {"type": "client"}
+    assert session["tools"] == [END_INTERVIEW_TOOL]
+    start.assert_called_once()
