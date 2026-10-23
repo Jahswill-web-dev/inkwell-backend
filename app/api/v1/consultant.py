@@ -354,7 +354,8 @@ async def start_interview(article_id: UUID, user: CurrentUser, db: DB) -> dict[s
             article_id=a.id,
             user_id=user.id,
             questions=[
-                {"id": str(index), "text": question} for index, question in enumerate(svc.QUESTIONS)
+                {"id": str(index), "text": goal}
+                for index, goal in enumerate(svc.COVERAGE_GOALS)
             ],
         )
         db.add(record)
@@ -584,7 +585,13 @@ async def answer(
     if settings.openai_api_key is None:
         raise svc.fail("ai_unavailable", "The interviewer is not configured.", 503)
     if not t.turns:
-        t.turns = [{"item_id": "opening", "speaker": "interviewer", "text": svc.QUESTIONS[0]}]
+        t.turns = [
+            {
+                "item_id": "opening",
+                "speaker": "interviewer",
+                "text": svc.TYPED_QUESTIONS[0],
+            }
+        ]
     if not any(turn["item_id"] == payload.item_id for turn in t.turns):
         t.turns = [
             *t.turns,

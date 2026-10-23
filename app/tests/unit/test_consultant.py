@@ -18,7 +18,7 @@ from app.schemas.consultant import (
     SectionRepairs,
 )
 from app.schemas.draft import ArticleDraftUpdate
-from app.services.consultant_service import effective_turns
+from app.services.consultant_service import COVERAGE_GOALS, TYPED_QUESTIONS, effective_turns
 from app.services.consultant_writer import (
     ConsultantWriter,
     compact_snapshot,
@@ -328,15 +328,34 @@ def test_generated_draft_with_anchors_can_be_serialized_for_job_checkpoint() -> 
 def test_consultant_voice_instructions_do_not_use_client_invitation_language() -> None:
     c = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", ["Founders"], [])
     prompt = build_interview_workflow_instructions(c)
-    assert "automatically creates a draft" in prompt
-    assert "at most two optional follow-ups" in prompt
-    assert "next natural pause" in prompt
-    assert "cost schedule" in prompt
-    assert "the client's team" not in prompt
+    compact_prompt = " ".join(prompt.split())
+    assert "completing it starts draft generation" in compact_prompt
+    assert "Confirm the proposed direction" in compact_prompt
+    assert "flexible objectives" in compact_prompt
+    assert "at most two optional follow-ups" in compact_prompt
+    assert "next natural pause" in compact_prompt
+    assert "cost schedule" in compact_prompt
+    assert "anything else the consultant would like to say" in compact_prompt
+    assert "clearly confirms the recap" in compact_prompt
+    assert "the client's team" not in compact_prompt
     assert "current interview as the only source" in WRITING_POLICY
     assert '"recognises patterns"' in WRITING_POLICY
     assert 'does not mean "makes predictions"' in WRITING_POLICY
     assert "unspecified group does not mean engineering students" in WRITING_POLICY
+
+
+def test_voice_coverage_goals_are_not_scripted_questions() -> None:
+    assert COVERAGE_GOALS == [
+        "The article's central argument",
+        "The intended reader and the problem they face",
+        "The consultant's distinctive viewpoint",
+        "A concrete personal or client experience",
+        "The practical method or process",
+        "Important limitations, risks, or qualifications",
+        "The practical takeaway for the reader",
+    ]
+    assert all("?" not in goal for goal in COVERAGE_GOALS)
+    assert TYPED_QUESTIONS[0] == "What is the main thing you want readers to understand?"
 
 
 def test_minimal_article_requires_no_client_or_brief() -> None:

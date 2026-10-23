@@ -74,7 +74,7 @@ def build_live_voice_instructions(
 ) -> str:
     """Build the concise conversation prompt for GPT-Live."""
     if isinstance(interview, ConsultantVoiceContext):
-        return interview.instructions(_resume_context(previous_turns or []))
+        return interview.delivery_instructions(_resume_context(previous_turns or []))
     article_title = interview.invitation.article_title or "the upcoming article"
     client_name = interview.invitation.client_name or "the client's team"
     writer_name = interview.invitation.writer_name or "the writer"
@@ -108,9 +108,9 @@ def build_interview_workflow_instructions(
     interview: GuestInterviewResponse | ConsultantVoiceContext,
     previous_turns: list[TranscriptTurn] | None = None,
 ) -> str:
-    """Build server-controlled instructions for one client voice interview."""
+    """Build server-controlled workflow instructions for one voice interview."""
     if isinstance(interview, ConsultantVoiceContext):
-        return interview.instructions(_resume_context(previous_turns or []))
+        return interview.workflow_instructions(_resume_context(previous_turns or []))
     article_title = interview.invitation.article_title or "the upcoming article"
     client_name = interview.invitation.client_name or "the client's team"
     writer_name = interview.invitation.writer_name or "the writer"

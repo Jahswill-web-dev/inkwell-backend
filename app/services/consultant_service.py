@@ -25,7 +25,17 @@ from app.db.models.workspace import Workspace, WorkspaceMember
 from app.prompts.consultant import PROMPT_VERSION
 from app.services.consultant_findings import ensure_editor_anchors, locate_paragraph
 
-QUESTIONS = [
+COVERAGE_GOALS = [
+    "The article's central argument",
+    "The intended reader and the problem they face",
+    "The consultant's distinctive viewpoint",
+    "A concrete personal or client experience",
+    "The practical method or process",
+    "Important limitations, risks, or qualifications",
+    "The practical takeaway for the reader",
+]
+
+TYPED_QUESTIONS = [
     "What is the main thing you want readers to understand?",
     "Where do people usually get stuck with this?",
     "What do you see differently from the usual advice?",

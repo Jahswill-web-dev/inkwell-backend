@@ -135,6 +135,81 @@ def test_live_voice_instructions_are_concise_and_delegate_workflow() -> None:
     assert "1. " not in instructions
 
 
+def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts() -> None:
+    interview = ConsultantVoiceContext(
+        "Jo",
+        "Practical AI for engineers",
+        "How engineers can use AI without replacing judgement",
+        ["Working engineers"],
+        [
+            {"id": "0", "text": "The article's central argument"},
+            # A legacy interview may still contain question-shaped records.
+            {"id": "legacy", "text": "Can you walk me through a specific example?"},
+        ],
+    )
+
+    delivery = build_live_voice_instructions(interview)
+    workflow = build_interview_workflow_instructions(interview)
+    compact_delivery = " ".join(delivery.split())
+    compact_workflow = " ".join(workflow.split())
+
+    assert "Let the delegated interview workflow decide" in compact_delivery
+    assert "Follow these phases in order" not in delivery
+    assert "greet the consultant by name" in compact_workflow
+    assert (
+        "Do not ask a substantive question until they clearly confirm readiness"
+        in compact_workflow
+    )
+    assert "explicitly tentative account" in compact_workflow
+    assert "planning context only" in compact_workflow
+    assert "not evidence that the consultant personally made any claim" in compact_workflow
+    assert "flexible objectives, never as a script" in compact_workflow
+    assert "Explicitly connect questions to details" in compact_workflow
+    assert "Skip objectives already answered and drop irrelevant ones" in compact_workflow
+    assert "at most two optional follow-ups" in compact_workflow
+    assert (
+        "personal experiences into thinking, perspective, knowledge, or expertise"
+        in compact_workflow
+    )
+    assert "recognising patterns into making predictions" in compact_workflow
+    assert "anything else the consultant would like to say" in compact_workflow
+    assert "added to or used in the blog article" in compact_workflow
+    assert (
+        "do not call end_interview until the consultant clearly confirms the recap"
+        in compact_workflow
+    )
+    assert "explicitly asks to finish immediately" in compact_workflow
+    assert '"article_title": "Practical AI for engineers"' in workflow
+    assert '"intended_audience": ["Working engineers"]' in workflow
+    assert '"coverage_objectives"' in workflow
+
+
+def test_consultant_voice_resume_does_not_repeat_completed_phases() -> None:
+    interview = ConsultantVoiceContext(
+        "Jo", "Handoffs", "Why clear ownership matters", ["Founders"], []
+    )
+    turns = [
+        TranscriptTurn(item_id="a1", speaker="interviewer", text="Are you ready?"),
+        TranscriptTurn(item_id="u1", speaker="participant", text="Yes, I am ready."),
+        TranscriptTurn(
+            item_id="a2",
+            speaker="interviewer",
+            text="It sounds like this is about clear ownership. Is that accurate?",
+        ),
+        TranscriptTurn(
+            item_id="u2",
+            speaker="participant",
+            text="Yes, specifically ownership during agency handoffs.",
+        ),
+    ]
+
+    workflow = build_interview_workflow_instructions(interview, turns)
+
+    assert "For a resumed interview, briefly acknowledge the interruption" in workflow
+    assert "do not repeat the greeting, readiness check, direction confirmation" in workflow
+    assert "Participant: Yes, specifically ownership during agency handoffs." in workflow
+
+
 def test_completion_tool_output_rejects_invalid_arguments() -> None:
     assert _end_interview_tool_output('{"reason":"questions_complete"}') == {
         "accepted": True,

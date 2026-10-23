@@ -20,6 +20,7 @@ from app.db.models.consultant import (
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
 from app.schemas.consultant import GeneratedDraft
+from app.services.consultant_service import COVERAGE_GOALS
 from app.services.consultant_writer import editor_sections
 from app.tests.integration.test_database import alembic_config, require_test_url
 from app.tests.integration.test_interview_invitations import clear_database
@@ -71,6 +72,8 @@ def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClie
     owner = register(client)
     stranger = register(client, "stranger", "marketing")
     aid, iid = setup_article(client, owner)
+    interview = client.get(f"/api/v1/consultant/interviews/{iid}", headers=owner).json()
+    assert [item["text"] for item in interview["questions"]] == COVERAGE_GOALS
     assert client.get(f"/api/v1/consultant/interviews/{iid}", headers=stranger).status_code == 404
     assert client.get(f"/api/v1/articles/{aid}", headers=stranger).status_code == 404
     assert client.get("/api/v1/articles", headers=owner).json()["items"] == []
