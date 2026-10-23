@@ -33,6 +33,7 @@ from app.services.consultant_ask_ai import (
     AskAIClarification,
     prepare_ask_ai,
 )
+from app.services.consultant_findings import ensure_editor_anchors, persist_findings
 from app.services.consultant_metrics import (
     MetricsRecorder,
     close_event,
@@ -47,7 +48,6 @@ from app.services.consultant_writer import (
     editor_sections,
     sanitize_draft_quotes,
     sanitize_evidence,
-    validate_draft,
     validate_draft_findings,
     validate_evidence,
 )
@@ -137,7 +137,7 @@ async def review_initial_draft(
     record_stage(writer.usage, "repair_sections", started)
     returned = [repair.section_index for repair in repairs.repairs]
     if len(returned) != len(indices) or set(returned) != indices:
-        raise DraftSourceFidelityError(["Repair did not return every affected section."])
+        return candidate, findings
     sections = list(candidate.sections)
     for repair in repairs.repairs:
         sections[repair.section_index] = repair.section
@@ -164,9 +164,13 @@ async def review_initial_draft(
         if finding.severity == "serious"
     ]
     if remaining:
-        raise DraftSourceFidelityError(
-            [finding_message(finding, repaired) for finding in remaining]
+        style = [finding for finding in style if finding.section_index not in indices]
+        style.extend(
+            finding
+            for finding in local_recheck + section_check.findings
+            if finding.severity == "style"
         )
+        return repaired, [*remaining, *style]
     style = [finding for finding in style if finding.section_index not in indices]
     style.extend(
         finding for finding in local_recheck + section_check.findings if finding.severity == "style"
@@ -339,6 +343,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         await checkpoint(factory, job_id, token, stage="validation", usage=writer.usage)
         evidence = sanitize_evidence(evidence, model_snapshot["turns"])
         validate_evidence(evidence, model_snapshot["turns"])
+        writing_suggestions: list[DraftFinding] = []
         if snapshot.get("request_kind") == "ask_ai":
 
             async def progress(stage: str) -> None:
@@ -361,7 +366,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 candidate=candidate_data,
                 usage=writer.usage,
             )
-            writing_suggestions = []
         else:
             needs_research = bool(
                 re.search(
@@ -404,7 +408,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 stage="check",
                 usage=writer.usage,
             )
-            writing_suggestions: list[DraftFinding] = []
             if snapshot.get("base_sections") is None:
                 candidate, writing_suggestions = await review_initial_draft(
                     writer,
@@ -412,11 +415,12 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                     candidate,
                 )
             else:
-                issues = validate_draft(
+                local_findings = validate_draft_findings(
                     candidate, model_snapshot["turns"], model_snapshot.get("external_research")
                 )
                 check = await writer.check(model_snapshot, candidate)
-                if issues or check.serious_issues or check.style_issues:
+                findings = local_findings + check.findings
+                if findings:
                     candidate = await writer.parse(
                         GeneratedDraft,
                         "Repair listed issues while preserving supported meaning and voice. "
@@ -426,28 +430,34 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                         {
                             **model_snapshot,
                             "candidate": candidate.model_dump(),
-                            "issues": issues + check.serious_issues + check.style_issues,
+                            "issues": [finding.explanation for finding in findings],
                         },
                     )
                     candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
                     await checkpoint(factory, job_id, token, candidate=candidate.model_dump())
                     check = await writer.check(model_snapshot, candidate)
-                    remaining_issues = validate_draft(
+                    remaining = validate_draft_findings(
                         candidate,
                         model_snapshot["turns"],
                         model_snapshot.get("external_research"),
                     )
-                    if remaining_issues or check.serious_issues:
-                        raise DraftSourceFidelityError(remaining_issues + check.serious_issues)
+                    remaining.extend(check.findings)
+                    writing_suggestions = remaining
             candidate_data = candidate.model_dump()
             if writing_suggestions:
+                candidate_data["findings"] = [
+                    finding.model_dump(mode="json") for finding in writing_suggestions
+                ]
                 candidate_data["review_suggestions"] = [
-                    finding.model_dump() for finding in writing_suggestions
+                    finding.model_dump(mode="json") for finding in writing_suggestions
                 ]
             await checkpoint(factory, job_id, token, candidate=candidate_data, usage=writer.usage)
             sections = editor_sections(
                 candidate, model_snapshot.get("external_research", {}).get("sources", [])
             )
+        sections = ensure_editor_anchors(sections)
+        raw_findings = candidate_data.get("findings", [])
+        persisted_findings = [DraftFinding.model_validate(item) for item in raw_findings]
         await checkpoint(factory, job_id, token, stage="saving", usage=writer.usage)
         async with factory.begin() as db:
             job = await db.scalar(
@@ -484,17 +494,38 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 )
             )
             if draft is None and snapshot.get("base_sections") is None:
-                db.add(ArticleDraft(article_id=article.id, sections=sections))
-            else:
-                db.add(
-                    ConsultantDraftRevision(
-                        article_id=article.id,
-                        generation_id=job.id,
-                        kind="proposal",
-                        sections=sections,
-                        gaps=candidate_data.get("gaps", []),
-                    )
+                draft = ArticleDraft(article_id=article.id, sections=sections)
+                db.add(draft)
+                await db.flush()
+                rows = await persist_findings(
+                    db,
+                    article_id=article.id,
+                    generation_id=job.id,
+                    draft_id=draft.id,
+                    sections=sections,
+                    findings=persisted_findings,
                 )
+            else:
+                revision = ConsultantDraftRevision(
+                    article_id=article.id,
+                    generation_id=job.id,
+                    kind="proposal",
+                    sections=sections,
+                    gaps=candidate_data.get("gaps", []),
+                )
+                db.add(revision)
+                await db.flush()
+                rows = await persist_findings(
+                    db,
+                    article_id=article.id,
+                    generation_id=job.id,
+                    revision_id=revision.id,
+                    sections=sections,
+                    findings=persisted_findings,
+                )
+            candidate_data["open_finding_count"] = sum(
+                row.classification == "unsupported" and row.status == "open" for row in rows
+            )
             article.status = "in_review"
             job.state, job.stage, job.error = "succeeded", "complete", None
             job.candidate = candidate_data

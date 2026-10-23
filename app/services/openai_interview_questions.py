@@ -25,6 +25,7 @@ class OpenAIClientInterviewQuestionGenerator:
             timeout=settings.openai_realtime_request_timeout_seconds,
         )
         self._model = settings.openai_interview_question_model
+        self._reasoning_effort = settings.openai_reasoning_effort
 
     async def generate_client_questions(
         self, context: dict[str, Any]
@@ -36,7 +37,7 @@ class OpenAIClientInterviewQuestionGenerator:
                 input=build_prompt(context),
                 text_format=GeneratedClientInterviewQuestions,
                 max_output_tokens=900,
-                reasoning={"effort": "none"},
+                reasoning={"effort": self._reasoning_effort},
                 store=False,
             )
         except APITimeoutError as exc:

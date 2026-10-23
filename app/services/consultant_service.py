@@ -12,6 +12,7 @@ from app.core.exceptions import AppError
 from app.db.models.article import Article
 from app.db.models.article_draft import ArticleDraft
 from app.db.models.consultant import (
+    ConsultantDraftFinding,
     ConsultantDraftRevision,
     ConsultantGeneration,
     ConsultantGenerationEvent,
@@ -22,6 +23,7 @@ from app.db.models.interview_transcript import InterviewTranscript
 from app.db.models.user import User
 from app.db.models.workspace import Workspace, WorkspaceMember
 from app.prompts.consultant import PROMPT_VERSION
+from app.services.consultant_findings import ensure_editor_anchors, locate_paragraph
 
 QUESTIONS = [
     "What is the main thing you want readers to understand?",
@@ -287,7 +289,10 @@ def job_response(job: ConsultantGeneration) -> dict[str, Any]:
         sections = candidate.get("sections", [])
         for finding in candidate.get("review_suggestions", []):
             index = finding.get("section_index", -1)
-            if finding.get("severity") != "style" or not 0 <= index < len(sections):
+            classification = finding.get("classification") or (
+                "interpretation" if finding.get("severity") == "style" else "unsupported"
+            )
+            if classification != "interpretation" or not 0 <= index < len(sections):
                 continue
             heading = sections[index].get("heading", "Article")
             explanation = finding.get("explanation", "").strip()
@@ -310,18 +315,44 @@ def job_response(job: ConsultantGeneration) -> dict[str, Any]:
         "clarification_question": (
             candidate.get("clarification_question") if job.state == "needs_clarification" else None
         ),
+        "review_status": (
+            "needs_attention" if candidate.get("open_finding_count", 0) else "clear"
+        ) if job.state == "succeeded" else None,
+        "open_finding_count": candidate.get("open_finding_count", 0),
     }
 
 
 async def save_draft(
     session: AsyncSession, article: Article, sections: list[dict[str, Any]]
 ) -> None:
+    sections = ensure_editor_anchors(sections)
     draft = await session.scalar(select(ArticleDraft).where(ArticleDraft.article_id == article.id))
     if draft is None:
         draft = ArticleDraft(article_id=article.id, sections=sections)
         session.add(draft)
     elif draft.sections != sections:
         draft.sections = sections
+    await session.flush()
+    findings = (
+        await session.scalars(
+            select(ConsultantDraftFinding).where(
+                ConsultantDraftFinding.draft_id == draft.id,
+                ConsultantDraftFinding.status == "open",
+            )
+        )
+    ).all()
+    for finding in findings:
+        try:
+            locate_paragraph(
+                sections,
+                finding.section_id,
+                finding.paragraph_id,
+                finding.section_index,
+                finding.paragraph_index,
+            )
+        except LookupError:
+            finding.status = "resolved"
+            finding.resolution_reason = "content_removed"
     await session.execute(
         delete(ConsultantDraftRevision).where(ConsultantDraftRevision.article_id == article.id)
     )

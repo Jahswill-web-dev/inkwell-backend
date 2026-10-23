@@ -90,7 +90,9 @@ def test_voice_provider_defaults_to_openai_live() -> None:
     assert settings.voice_interview_provider == "openai_live"
     assert settings.consultant_enabled is True
     assert settings.elevenlabs_base_url == "https://api.elevenlabs.io"
-    assert settings.openai_knowledge_extraction_model == "gpt-5.6-luna"
+    assert settings.openai_interview_question_model == "gpt-5.6-sol"
+    assert settings.openai_knowledge_extraction_model == "gpt-5.6-sol"
+    assert settings.openai_reasoning_effort == "medium"
     assert settings.openai_knowledge_extraction_request_timeout_seconds == 60
     assert settings.openai_knowledge_extraction_max_output_tokens == 4_000
 

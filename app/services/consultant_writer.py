@@ -22,6 +22,7 @@ from app.schemas.consultant import (
     DraftCheck,
     DraftFinding,
     Evidence,
+    FocusedParagraphRepair,
     GeneratedDraft,
     SectionRepairs,
 )
@@ -103,6 +104,7 @@ class ConsultantWriter:
             max_retries=0,
         )
         self.model = model
+        self.reasoning_effort = settings.openai_reasoning_effort
         self.metrics = metrics
         self.usage: dict[str, Any] = {
             "input_tokens": 0,
@@ -139,7 +141,7 @@ class ConsultantWriter:
                     input=source_json(source),
                     text_format=schema,
                     max_output_tokens=max_output_tokens,
-                    reasoning={"effort": "low"},
+                    reasoning={"effort": getattr(self, "reasoning_effort", "medium")},
                     store=False,
                 )
                 if metric:
@@ -252,6 +254,7 @@ class ConsultantWriter:
                         }
                     ),
                     max_output_tokens=1800,
+                    reasoning={"effort": getattr(self, "reasoning_effort", "medium")},
                     store=False,
                 )
                 if metric:
@@ -379,12 +382,42 @@ class ConsultantWriter:
             DraftCheck,
             "Review only the supplied changed sections against cited participant turns and "
             "verified public research, taking surrounding excerpts into account. Finding indices "
-            "are zero-based positions within changed_sections. Mark unsupported claims, invented "
-            "experiences, incorrect quotations, and changed meaning serious; wording suggestions "
-            "are style. A source ID alone does not establish that its text supports a claim.",
+            "are zero-based positions within changed_sections. Classify reasonable but unconfirmed "
+            "editorial expansion as interpretation. Classify new capabilities, benefits, "
+            "audiences, "
+            "causes, predictions, experiences, quotations, or stronger certainty as unsupported. "
+            "Include the exact claim_text and a suggested_replacement when one is supported. "
+            "'Cost schedule' becoming 'cost and schedule management' is interpretation unless "
+            "clarified; 'recognises patterns' becoming 'makes predictions' is unsupported. "
+            "A source "
+            "ID alone does not establish that its text supports a claim.",
             source,
             max_output_tokens=1300,
             operation_name="check_changes",
+        )
+
+    async def repair_finding(self, source: dict[str, Any]) -> FocusedParagraphRepair:
+        return await self.parse(
+            FocusedParagraphRepair,
+            "Repair only the supplied paragraph and only the flagged claim. Preserve every "
+            "supported point, the participant's terminology, scope, audience, and certainty. "
+            "Use only the supplied evidence. Return the complete replacement paragraph.",
+            source,
+            max_output_tokens=900,
+            operation_name="repair_finding",
+        )
+
+    async def check_focused_repair(self, source: dict[str, Any]) -> DraftCheck:
+        return await self.parse(
+            DraftCheck,
+            "Check only the proposed replacement paragraph against the supplied evidence. "
+            "Return exact claim_text and a supported suggested_replacement for each issue. "
+            "Classify reasonable editorial expansion as interpretation, and any new capability, "
+            "benefit, audience, cause, prediction, experience, quotation, public fact, or stronger "
+            "certainty as unsupported. Use section_index 0 and paragraph_index 0.",
+            source,
+            max_output_tokens=900,
+            operation_name="check_finding_repair",
         )
 
     async def check_article_flow(self, source: dict[str, Any]) -> ArticleFlowCheck:
@@ -451,10 +484,15 @@ class ConsultantWriter:
             DraftCheck,
             "Review the complete draft against the participant interview and public research. "
             "Return actionable findings using zero-based section_index and paragraph_index. "
-            "Mark unsupported facts or public facts, invented experiences, incorrect quotations, "
-            "changed meaning, excluded material, changed certainty, and interviewer attribution "
-            "as serious; use changed_meaning for the latter three when appropriate. "
-            "Mark wording and readability suggestions as style. Give a short, specific "
+            "Classify reasonable but unconfirmed editorial expansion as interpretation. Classify "
+            "new capabilities, benefits, audiences, causes, predictions, experiences, "
+            "public facts, "
+            "quotations, or stronger certainty as unsupported. 'Cost schedule' becoming 'cost and "
+            "schedule management' is interpretation unless clarified; 'recognises patterns' "
+            "becoming "
+            "'makes predictions' is unsupported. Use the most specific category. Include the exact "
+            "claim_text and a nullable suggested_replacement supported by the cited evidence. "
+            "Give a short, specific "
             "explanation and relevant participant turn IDs or public source IDs where applicable. "
             "Check public facts against external_research findings and cited external_source_ids. "
             "Do not treat a style preference as an accuracy issue. An empty findings list means "
@@ -547,8 +585,11 @@ class ConsultantWriter:
             DraftCheck,
             "Check only the listed repaired sections against their cited participant turns, "
             "public research, and the surrounding article headings. Return zero-based locations. "
-            "Treat unsupported facts, invented experience, incorrect quotations, changed meaning, "
-            "or unsupported public claims as serious. Wording and readability are style only. "
+            "Classify reasonable editorial interpretation as interpretation and any new "
+            "capability, benefit, audience, cause, prediction, experience, quotation, public fact, "
+            "changed meaning, or stronger certainty as unsupported. Include exact claim_text and "
+            "a supported nullable "
+            "suggested_replacement. "
             "Do not silently pass a claim merely because its source ID exists. "
             "Return an empty findings list only if no issue remains.",
             {
@@ -672,9 +713,13 @@ def validate_draft_findings(
                 findings.append(
                     DraftFinding(
                         severity="style" if category == "readability" else "serious",
+                        classification=(
+                            "interpretation" if category == "readability" else "unsupported"
+                        ),
                         category=category,
                         section_index=section_index,
                         paragraph_index=paragraph_index,
+                        claim_text=paragraph.text,
                         explanation=explanation,
                         source_turn_ids=paragraph.source_turn_ids,
                         external_source_ids=paragraph.external_source_ids,
@@ -756,8 +801,9 @@ def editor_sections(
                     }
                 )
         return {
-            "type": "paragraph",
+            "type": "anchored-paragraph",
             "version": 1,
+            "paragraphId": str(item.paragraph_id or uuid4()),
             "direction": "ltr",
             "format": "",
             "indent": 0,
@@ -768,7 +814,7 @@ def editor_sections(
 
     return [
         {
-            "id": str(uuid4()),
+            "id": str(section.section_id or uuid4()),
             "outline_section_id": None,
             "title": heading(section.heading),
             "goal": "Explain the consultant's perspective",

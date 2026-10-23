@@ -13,11 +13,13 @@ from urllib.parse import urlparse
 from app.schemas.consultant import (
     ArticleEditAction,
     ArticleEditPlan,
+    DraftFinding,
     Evidence,
     GeneratedDraft,
     GeneratedSection,
 )
 from app.schemas.draft import ArticleDraftUpdate
+from app.services.consultant_findings import anchor_findings
 from app.services.consultant_writer import (
     ConsultantWriter,
     _plain_editor_text,
@@ -177,6 +179,8 @@ async def prepare_ask_ai(
     writer.usage.setdefault("stage_seconds", {})["plan"] = round(time.perf_counter() - started, 3)
 
     current, moved = move_sections(copy.deepcopy(original), plan.actions)
+    review_findings: list[DraftFinding] = []
+    flow_review_findings: list[DraftFinding] = []
     actions = [action for action in plan.actions if action.kind in {"text_edit", "addition"}]
     relevant_sections = [
         section for section in current if section["id"] in {a.target_section_id for a in actions}
@@ -312,6 +316,7 @@ async def prepare_ask_ai(
             time.perf_counter() - start, 3
         )
         findings.extend(ai_check.findings)
+        review_findings = findings
         serious = [f for f in findings if f.severity == "serious"]
         if serious:
             await progress("repair")
@@ -348,9 +353,7 @@ async def prepare_ask_ai(
             wanted = {f.section_index for f in serious}
             returned = [r.section_index for r in repaired.repairs]
             if len(returned) != len(wanted) or set(returned) != wanted:
-                raise AskAIAccuracyError(
-                    ["The source check could not repair every affected section."]
-                )
+                repaired.repairs = []
             for repair in repaired.repairs:
                 draft.sections[repair.section_index] = repair.section
                 section_id = changed_ids[repair.section_index]
@@ -364,30 +367,28 @@ async def prepare_ask_ai(
                     "title": generated["title"],
                     "editor_state": generated["editor_state"],
                 }
-            check_editor_sections(current)
-            remaining = validate_draft_findings(
-                draft, snapshot["turns"], snapshot.get("external_research")
-            )
-            repaired_ids = {
-                turn_id
-                for section in draft.sections
-                for paragraph in section.paragraphs
-                for turn_id in paragraph.source_turn_ids
-            }
-            recheck = await writer.check_article_changes(
-                {
-                    **check_source,
-                    "changed_sections": draft.model_dump()["sections"],
-                    "participant_turns": [
-                        turn for turn in snapshot["turns"] if turn["item_id"] in repaired_ids
-                    ],
-                }
-            )
-            remaining.extend(recheck.findings)
-            if any(f.severity == "serious" for f in remaining):
-                raise AskAIAccuracyError(
-                    [f.explanation for f in remaining if f.severity == "serious"]
+            if repaired.repairs:
+                check_editor_sections(current)
+                remaining = validate_draft_findings(
+                    draft, snapshot["turns"], snapshot.get("external_research")
                 )
+                repaired_ids = {
+                    turn_id
+                    for section in draft.sections
+                    for paragraph in section.paragraphs
+                    for turn_id in paragraph.source_turn_ids
+                }
+                recheck = await writer.check_article_changes(
+                    {
+                        **check_source,
+                        "changed_sections": draft.model_dump()["sections"],
+                        "participant_turns": [
+                            turn for turn in snapshot["turns"] if turn["item_id"] in repaired_ids
+                        ],
+                    }
+                )
+                remaining.extend(recheck.findings)
+                review_findings = remaining
 
     if moved or plan.actions[0].kind == "full_rewrite":
         await progress("check")
@@ -431,7 +432,8 @@ async def prepare_ask_ai(
             )
             returned = [edit.section_index for edit in transition_edits.edits]
             if len(returned) != len(affected) or set(returned) != affected:
-                raise AskAIAccuracyError(["The transition repair was incomplete."])
+                flow_review_findings.extend(flow.findings)
+                transition_edits.edits = []
             for edit in transition_edits.edits:
                 original_section = current[edit.section_index]
                 checked = GeneratedDraft(
@@ -465,7 +467,11 @@ async def prepare_ask_ai(
                     if f.severity == "serious"
                 ]
                 if serious_transition:
-                    raise AskAIAccuracyError(serious_transition)
+                    flow_review_findings.extend(
+                        finding.model_copy(update={"section_index": edit.section_index})
+                        for finding in local_issues + ai_issues.findings
+                    )
+                    continue
                 generated = editor_sections(
                     checked,
                     snapshot.get("external_research", {}).get("sources", []),
@@ -483,9 +489,7 @@ async def prepare_ask_ai(
             check_editor_sections(current)
             summary = (summary + " Adjusted the affected transitions.").strip()
         elif any(f.severity == "serious" for f in flow.findings):
-            raise AskAIAccuracyError(
-                [f.explanation for f in flow.findings if f.severity == "serious"]
-            )
+            flow_review_findings.extend(flow.findings)
 
     if not summary:
         summary = "Moved the requested section." if moved else "Updated the requested section."
@@ -495,9 +499,26 @@ async def prepare_ask_ai(
         raise AskAIClarification(
             "I couldn't make a supported change. Could you add more detail to your request?"
         )
-    candidate = {
+    candidate: dict[str, Any] = {
         "summary": summary,
         "plan": plan.model_dump(),
         "changed_section_ids": changed_ids,
     }
+    if review_findings or flow_review_findings:
+        remapped: list[DraftFinding] = []
+        for finding in review_findings:
+            if finding.section_index >= len(changed_ids):
+                continue
+            section_id = changed_ids[finding.section_index]
+            current_index = next(
+                (i for i, section in enumerate(current) if section["id"] == section_id),
+                finding.section_index,
+            )
+            remapped.append(finding.model_copy(update={"section_index": current_index}))
+        anchored = anchor_findings(remapped, current)
+        anchored.extend(anchor_findings(flow_review_findings, current))
+        candidate["findings"] = [
+            finding.model_dump(mode="json")
+            for finding in anchored
+        ]
     return current, candidate, snapshot

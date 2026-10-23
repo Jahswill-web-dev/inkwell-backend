@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.prompts.consultant import WRITING_POLICY
+from app.prompts.consultant import PROMPT_VERSION, WRITING_POLICY
 from app.schemas.auth import RegisterRequest
 from app.schemas.consultant import (
     ConsultantArticleInput,
@@ -42,6 +42,45 @@ TURNS: list[dict[str, Any]] = [
     },
     {"item_id": "b", "speaker": "interviewer", "text": "Did that increase revenue by 50%?"},
 ]
+
+
+def test_consultant_fidelity_policy_has_a_new_cache_version() -> None:
+    assert PROMPT_VERSION == "consultant_claim_review_v4"
+
+
+@pytest.mark.asyncio
+async def test_consultant_writer_uses_medium_reasoning_for_parse_and_research() -> None:
+    parse = AsyncMock(
+        return_value=SimpleNamespace(
+            output_parsed=DraftCheck(findings=[]), usage=None, _request_id="parse-request"
+        )
+    )
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            output=[], output_text="No public evidence needed.", usage=None,
+            _request_id="research-request",
+        )
+    )
+    writer = object.__new__(ConsultantWriter)
+    writer.client = SimpleNamespace(responses=SimpleNamespace(parse=parse, create=create))
+    writer.model = "gpt-5.6-sol"
+    writer.reasoning_effort = "medium"
+    writer.metrics = None
+    writer.usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "api_call_counts": {},
+        "api_attempt_counts": {},
+        "stage_seconds": {},
+        "model_calls": [],
+        "rate_limit_wait_seconds": 0,
+    }
+
+    await writer.parse(DraftCheck, "Check the draft.", {}, operation_name="check")
+    await writer.research({"instruction": "Find sources"})
+
+    assert parse.await_args.kwargs["reasoning"] == {"effort": "medium"}
+    assert create.await_args.kwargs["reasoning"] == {"effort": "medium"}
 
 
 def draft(
@@ -208,9 +247,14 @@ def test_consultant_voice_instructions_do_not_use_client_invitation_language() -
     c = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", ["Founders"], [])
     prompt = build_interview_workflow_instructions(c)
     assert "automatically creates a draft" in prompt
-    assert "at most two follow-ups" in prompt
+    assert "at most two optional follow-ups" in prompt
+    assert "next natural pause" in prompt
+    assert "cost schedule" in prompt
     assert "the client's team" not in prompt
     assert "current interview as the only source" in WRITING_POLICY
+    assert '"recognises patterns"' in WRITING_POLICY
+    assert 'does not mean "makes predictions"' in WRITING_POLICY
+    assert "unspecified group does not mean engineering students" in WRITING_POLICY
 
 
 def test_minimal_article_requires_no_client_or_brief() -> None:

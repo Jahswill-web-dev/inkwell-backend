@@ -4,11 +4,37 @@ from uuid import uuid4
 
 import pytest
 
-from app.schemas.interview_transcript import GeneratedInterviewInsights
+from app.schemas.interview_transcript import GeneratedInterviewInsights, TranscriptTurn
 from app.services.interview_transcript_service import (
     InterviewInsightsResult,
     InterviewTranscriptService,
+    OpenAIInterviewInsightsGenerator,
 )
+
+
+async def test_interview_insights_use_sol_with_medium_reasoning() -> None:
+    insights = GeneratedInterviewInsights(
+        summary="Summary",
+        key_insights=[],
+        examples_and_evidence=[],
+        claims_to_verify=[],
+        open_questions=[],
+    )
+    parse = AsyncMock(
+        return_value=SimpleNamespace(output_parsed=insights, usage=None, status="completed")
+    )
+    generator = object.__new__(OpenAIInterviewInsightsGenerator)
+    generator.model_id = "gpt-5.6-sol"
+    generator.reasoning_effort = "medium"
+    generator._client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+
+    result = await generator.generate(
+        article_title="Research",
+        turns=[TranscriptTurn(item_id="p1", speaker="participant", text="An answer")],
+    )
+
+    assert result.model_id == "gpt-5.6-sol"
+    assert parse.await_args.kwargs["reasoning"] == {"effort": "medium"}
 
 
 @pytest.mark.parametrize("failure", ["unknown_source", "unexpected_error"])

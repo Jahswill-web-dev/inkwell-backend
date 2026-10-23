@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from app.schemas.interview_invitation import (
@@ -9,8 +10,10 @@ from app.schemas.interview_invitation import (
     InterviewInvitationResponse,
 )
 from app.schemas.interview_transcript import TranscriptTurn
+from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import (
     END_INTERVIEW_TOOL,
+    OpenAIRealtimeService,
     _end_interview_tool_output,
     _run_live_sideband_controller,
     build_interview_workflow_instructions,
@@ -64,6 +67,9 @@ def test_workflow_instructions_use_invitation_and_question_plan() -> None:
     assert "do\n  not treat silence as consent to begin" in instructions
     assert "end_interview with\n  reason participant_finished" in instructions
     assert "end_interview with reason questions_complete" in instructions
+    assert "next natural pause" in instructions
+    assert "cost schedule" in instructions
+    assert "does not count\n  as the optional follow-up" in instructions
 
 
 def test_end_interview_tool_accepts_only_completion_reasons() -> None:
@@ -124,6 +130,7 @@ def test_live_voice_instructions_are_concise_and_delegate_workflow() -> None:
     instructions = build_live_voice_instructions(interview)
 
     assert "Delegate question, follow-up, and completion workflow decisions" in instructions
+    assert "next natural pause" in instructions
     assert "<interview_plan>" not in instructions
     assert "1. " not in instructions
 
@@ -194,3 +201,27 @@ async def test_sideband_executes_each_completion_call_once() -> None:
     assert len(connection.sent) == 2
     assert connection.sent[0]["type"] == "response.item.create"
     assert connection.sent[1] == {"type": "response.create"}
+
+
+async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            session=SimpleNamespace(id="live-session"),
+            transport=SimpleNamespace(sdp="answer-sdp"),
+        )
+    )
+    service = object.__new__(OpenAIRealtimeService)
+    service._client = SimpleNamespace(live=SimpleNamespace(create=create))
+    service._model = "gpt-live-1"
+    service._workflow_model = "gpt-5.6-sol"
+    service._reasoning_effort = "medium"
+    interview = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", [], [])
+
+    with patch("app.services.openai_realtime.start_live_sideband_controller"):
+        result = await service.create_call(sdp="offer-sdp", interview=interview)
+
+    assert result.external_session_id == "live-session"
+    session = create.await_args.kwargs["session"]
+    assert session["model"] == "gpt-live-1"
+    assert session["delegation"]["responses"]["model"] == "gpt-5.6-sol"
+    assert session["delegation"]["responses"]["reasoning"] == {"effort": "medium"}

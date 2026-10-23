@@ -61,11 +61,14 @@ class Settings(BaseSettings):
     # OpenAI Live voice interviews
     openai_api_key: SecretStr | None = Field(default=None)
     openai_live_model: str = Field(default="gpt-live-1", min_length=1)
-    openai_interview_question_model: str = Field(default="gpt-5.6-luna", min_length=1)
+    openai_interview_question_model: str = Field(default="gpt-5.6-sol", min_length=1)
     openai_realtime_request_timeout_seconds: float = Field(default=20, gt=0)
-    openai_knowledge_extraction_model: str = Field(default="gpt-5.6-luna", min_length=1)
+    openai_knowledge_extraction_model: str = Field(default="gpt-5.6-sol", min_length=1)
     openai_knowledge_extraction_request_timeout_seconds: float = Field(default=60, gt=0)
     openai_knowledge_extraction_max_output_tokens: int = Field(default=4_000, gt=0)
+    openai_reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] = (
+        "medium"
+    )
 
     # Realtime voice interview provider. This is deliberately server-controlled;
     # interview guests cannot select or override it.

@@ -164,17 +164,17 @@ async def test_serious_finding_repairs_one_section_and_preserves_the_other() -> 
 
 
 @pytest.mark.asyncio
-async def test_unresolved_serious_finding_fails_after_one_section_repair() -> None:
+async def test_unresolved_serious_finding_returns_reviewable_draft() -> None:
     writer = ReviewWriter(
         DraftCheck(findings=[
             finding("serious", "unsupported_fact", "No interview support for 50% growth.")
         ]),
         repaired_text="Revenue grew 50%.",
     )
-    with pytest.raises(consultant.DraftSourceFidelityError) as error:
-        await consultant.review_initial_draft(
-            writer, {"turns": TURNS}, example_draft("Revenue grew 50%.")
-        )
-    assert "Opening" in error.value.issues[0]
-    assert "Numerical claim" in error.value.issues[0]
+    draft, findings = await consultant.review_initial_draft(
+        writer, {"turns": TURNS}, example_draft("Revenue grew 50%.")
+    )
+    assert draft.sections[0].paragraphs[0].text == "Revenue grew 50%."
+    assert findings[0].classification == "unsupported"
+    assert "Numerical claim" in findings[0].explanation
     assert writer.calls == ["check_full", "repair_sections", "check_sections"]

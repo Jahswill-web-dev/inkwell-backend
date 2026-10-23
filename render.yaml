@@ -55,6 +55,12 @@ services:
         value: "true"
       - key: CONSULTANT_MODEL
         value: gpt-5.6-sol
+      - key: OPENAI_INTERVIEW_QUESTION_MODEL
+        value: gpt-5.6-sol
+      - key: OPENAI_KNOWLEDGE_EXTRACTION_MODEL
+        value: gpt-5.6-sol
+      - key: OPENAI_REASONING_EFFORT
+        value: medium
       - key: LOG_LEVEL
         value: INFO
       - key: VOICE_INTERVIEW_PROVIDER
@@ -96,6 +102,8 @@ services:
         sync: false
       - key: CONSULTANT_MODEL
         value: gpt-5.6-sol
+      - key: OPENAI_REASONING_EFFORT
+        value: medium
       - key: CONSULTANT_ENABLED
         value: "true"
 

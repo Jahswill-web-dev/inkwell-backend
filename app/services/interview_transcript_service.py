@@ -41,6 +41,7 @@ class OpenAIInterviewInsightsGenerator:
     def __init__(self, settings: Settings) -> None:
         assert settings.openai_api_key is not None
         self.model_id = settings.openai_interview_question_model
+        self.reasoning_effort = settings.openai_reasoning_effort
         self._client = AsyncOpenAI(
             api_key=settings.openai_api_key.get_secret_value(),
             timeout=settings.openai_realtime_request_timeout_seconds,
@@ -56,7 +57,7 @@ class OpenAIInterviewInsightsGenerator:
                 input=build_prompt(article_title=article_title, turns=turns),
                 text_format=GeneratedInterviewInsights,
                 max_output_tokens=2_000,
-                reasoning={"effort": "none"},
+                reasoning={"effort": self.reasoning_effort},
                 store=False,
             )
         except APITimeoutError as exc:

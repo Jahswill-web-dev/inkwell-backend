@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from app.schemas.interview_transcript import TranscriptTurn
 
-PROMPT_VERSION = "interview-insights-v1"
+PROMPT_VERSION = "interview-insights-v2"
 SYSTEM_INSTRUCTION = """You turn a source interview transcript into accurate editorial notes.
 Use only what the participant actually said. Do not invent facts or improve claims.
 Every key insight, example, and claim-to-verify must cite source item IDs from the transcript.
 Keep claims that need independent checking in claims_to_verify.
+Stay close to the participant's wording and preserve scope, audience, certainty, and terminology.
+Do not infer a new capability, benefit, result, cause, prediction, or more specific audience from a
+related statement. Preserve unresolved ambiguous phrases or place them in claims_to_verify rather
+than silently resolving them.
 Return an empty list when unsupported."""
 
 

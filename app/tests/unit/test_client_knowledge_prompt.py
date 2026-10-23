@@ -11,12 +11,15 @@ from app.schemas.interview_transcript import TranscriptTurn
 
 
 def test_prompt_covers_the_taxonomy_and_evidence_rules() -> None:
-    assert PROMPT_VERSION == "client-knowledge-v1"
+    assert PROMPT_VERSION == "client-knowledge-v2"
     assert set(CATEGORY_GUIDANCE) == set(KNOWLEDGE_CATEGORIES)
     assert "participant transcript item IDs" in SYSTEM_INSTRUCTION
     assert "must never be cited" in SYSTEM_INSTRUCTION
     assert "use create as proposed_action" in SYSTEM_INSTRUCTION
     assert "Return an empty proposals list" in SYSTEM_INSTRUCTION
+    assert '"Recognises patterns" does not mean "makes' in SYSTEM_INSTRUCTION
+    assert 'predictions"' in SYSTEM_INSTRUCTION
+    assert '"cost schedule"' in SYSTEM_INSTRUCTION
 
 
 def test_prompt_serializes_client_context_and_transcript_as_json() -> None:

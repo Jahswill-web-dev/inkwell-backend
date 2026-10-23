@@ -12,6 +12,7 @@ from app.db.models.client_knowledge import (
     ClientKnowledgeSource,
 )
 from app.db.models.consultant import (
+    ConsultantDraftFinding,
     ConsultantDraftRevision,
     ConsultantGeneration,
     ConsultantGenerationEvent,
@@ -37,6 +38,7 @@ __all__ = [
     "ClientKnowledgeProposal",
     "ClientKnowledgeProposalSource",
     "ClientKnowledgeSource",
+    "ConsultantDraftFinding",
     "ConsultantDraftRevision",
     "ConsultantGeneration",
     "ConsultantGenerationEvent",

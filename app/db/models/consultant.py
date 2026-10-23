@@ -4,7 +4,16 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,6 +80,44 @@ class ConsultantDraftRevision(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     kind: Mapped[str] = mapped_column(String(24))
     sections: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     gaps: Mapped[list[str]] = mapped_column(JSONB, default=list)
+
+
+class ConsultantDraftFinding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "consultant_draft_findings"
+    __table_args__ = (
+        CheckConstraint(
+            "(draft_id IS NOT NULL) <> (revision_id IS NOT NULL)",
+            name="ck_consultant_draft_findings_one_target",
+        ),
+        Index("ix_consultant_draft_findings_draft_status", "draft_id", "status"),
+        Index("ix_consultant_draft_findings_revision_status", "revision_id", "status"),
+    )
+
+    article_id: Mapped[UUID] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    generation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("consultant_generations.id", ondelete="SET NULL"), nullable=True
+    )
+    draft_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("article_drafts.id", ondelete="CASCADE"), nullable=True
+    )
+    revision_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("consultant_draft_revisions.id", ondelete="CASCADE"), nullable=True
+    )
+    classification: Mapped[str] = mapped_column(String(24), nullable=False)
+    category: Mapped[str] = mapped_column(String(48), nullable=False)
+    section_id: Mapped[UUID] = mapped_column(nullable=False)
+    section_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    paragraph_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    paragraph_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    claim_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    source_turn_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    external_source_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    suggested_replacement: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
+    resolution_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
 
 class ConsultantGenerationEvent(UUIDPrimaryKeyMixin, Base):

@@ -11,6 +11,8 @@ Prioritize specific experiences, decisions, examples, outcomes, practical proces
 Do not ask generic background questions, repeat a topic, invent facts, or ask for information
 already present in the context. Keep questions natural for a spoken interview, direct, and under
 180 characters.
+When supplied context contains materially ambiguous terminology, include a neutral question that
+quotes the wording and asks the participant to clarify it without suggesting an answer as fact.
 Return only the structured response."""
 
 

@@ -93,7 +93,7 @@ async def test_adapter_returns_validated_proposals_and_required_controls(
     assert request["instructions"] == SYSTEM_INSTRUCTION
     assert request["text_format"] is GeneratedKnowledgeProposals
     assert request["max_output_tokens"] == 2_500
-    assert request["reasoning"] == {"effort": "none"}
+    assert request["reasoning"] == {"effort": "medium"}
     assert request["store"] is False
     assert "answer-1" in request["input"]
 

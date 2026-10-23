@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -88,6 +89,7 @@ class Evidence(BaseModel):
 
 
 class DraftParagraph(BaseModel):
+    paragraph_id: UUID | None = None
     text: str
     source_turn_ids: list[str]
     direct_quotes: list[str]
@@ -95,6 +97,7 @@ class DraftParagraph(BaseModel):
 
 
 class GeneratedSection(BaseModel):
+    section_id: UUID | None = None
     heading: str
     paragraphs: list[DraftParagraph] = Field(min_length=1)
 
@@ -107,8 +110,15 @@ class GeneratedDraft(BaseModel):
 
 
 class DraftFinding(BaseModel):
-    severity: Literal["serious", "style"]
+    id: UUID | None = None
+    classification: Literal["supported", "interpretation", "unsupported"] | None = None
+    severity: Literal["serious", "style"] | None = None
     category: Literal[
+        "unsupported_capability",
+        "unsupported_benefit",
+        "unsupported_audience",
+        "unsupported_causality",
+        "unsupported_prediction",
         "unsupported_fact",
         "unsupported_public_fact",
         "invented_experience",
@@ -118,15 +128,39 @@ class DraftFinding(BaseModel):
         "readability",
     ]
     section_index: int = Field(ge=0)
+    section_id: UUID | None = None
     paragraph_index: int | None = Field(default=None, ge=0)
+    paragraph_id: UUID | None = None
+    claim_text: str = Field(default="", max_length=4000)
     explanation: str = Field(min_length=1, max_length=500)
     source_turn_ids: list[str] = Field(default_factory=list)
     external_source_ids: list[str] = Field(default_factory=list)
+    suggested_replacement: str | None = Field(default=None, max_length=10000)
+    status: Literal["open", "resolved"] = "open"
+    resolution_reason: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_legacy_severity(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        mapped = dict(value)
+        if not mapped.get("classification"):
+            mapped["classification"] = (
+                "interpretation"
+                if mapped.get("severity") == "style"
+                and mapped.get("category") in {"wording", "readability"}
+                else "unsupported"
+            )
+        if not mapped.get("severity"):
+            mapped["severity"] = (
+                "style" if mapped["classification"] == "interpretation" else "serious"
+            )
+        return mapped
 
     @model_validator(mode="after")
     def accuracy_cannot_be_downgraded(self) -> DraftFinding:
-        if self.category not in {"wording", "readability"}:
-            self.severity = "serious"
+        self.severity = "serious" if self.classification == "unsupported" else "style"
         return self
 
 
@@ -135,11 +169,36 @@ class DraftCheck(BaseModel):
 
     @property
     def serious_issues(self) -> list[str]:
-        return [finding.explanation for finding in self.findings if finding.severity == "serious"]
+        return [
+            finding.explanation
+            for finding in self.findings
+            if finding.classification == "unsupported"
+        ]
 
     @property
     def style_issues(self) -> list[str]:
-        return [finding.explanation for finding in self.findings if finding.severity == "style"]
+        return [
+            finding.explanation
+            for finding in self.findings
+            if finding.classification == "interpretation"
+        ]
+
+
+class FindingRepairInput(Input):
+    replacement_paragraph: str | None = Field(default=None, min_length=1, max_length=30000)
+
+
+class FindingRepairPreview(BaseModel):
+    finding_id: UUID
+    before: str
+    after: str
+    classification: Literal["supported", "interpretation", "unsupported"]
+    findings: list[DraftFinding] = Field(default_factory=list)
+    target_version: str
+
+
+class FocusedParagraphRepair(BaseModel):
+    replacement_paragraph: str = Field(min_length=1, max_length=30000)
 
 
 class SectionRepair(BaseModel):

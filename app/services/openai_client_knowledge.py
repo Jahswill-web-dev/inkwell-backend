@@ -19,6 +19,7 @@ class OpenAIClientKnowledgeGenerator:
     def __init__(self, settings: Settings, *, client: AsyncOpenAI | None = None) -> None:
         assert settings.openai_api_key is not None
         self.model_id = settings.openai_knowledge_extraction_model
+        self.reasoning_effort = settings.openai_reasoning_effort
         self.max_output_tokens = settings.openai_knowledge_extraction_max_output_tokens
         self._client = client or AsyncOpenAI(
             api_key=settings.openai_api_key.get_secret_value(),
@@ -42,7 +43,7 @@ class OpenAIClientKnowledgeGenerator:
                 ),
                 text_format=GeneratedKnowledgeProposals,
                 max_output_tokens=self.max_output_tokens,
-                reasoning={"effort": "none"},
+                reasoning={"effort": self.reasoning_effort},
                 store=False,
             )
         except APITimeoutError as exc:

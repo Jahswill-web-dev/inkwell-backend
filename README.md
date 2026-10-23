@@ -1654,12 +1654,16 @@ CONSULTANT_ENABLED=true
 CONSULTANT_MODEL=gpt-5.6-sol
 CONSULTANT_REQUEST_TIMEOUT_SECONDS=120
 OPENAI_LIVE_MODEL=gpt-live-1
-OPENAI_INTERVIEW_QUESTION_MODEL=gpt-5.6-luna
+OPENAI_INTERVIEW_QUESTION_MODEL=gpt-5.6-sol
+OPENAI_KNOWLEDGE_EXTRACTION_MODEL=gpt-5.6-sol
+OPENAI_REASONING_EFFORT=medium
 OPENAI_REALTIME_REQUEST_TIMEOUT_SECONDS=20
 ```
 
 `CONSULTANT_MODEL` controls the understand/write/check pipeline independently of marketing models.
-Typed follow-up questions use `OPENAI_INTERVIEW_QUESTION_MODEL`. Consultant voice uses OpenAI live
+Typed follow-up questions and delegated voice workflow use `OPENAI_INTERVIEW_QUESTION_MODEL`.
+Reusable knowledge extraction uses `OPENAI_KNOWLEDGE_EXTRACTION_MODEL`. Applicable OpenAI Responses
+calls use `OPENAI_REASONING_EFFORT`. Consultant voice uses OpenAI live
 regardless of `VOICE_INTERVIEW_PROVIDER`, which still controls marketing voice sessions.
 
 Start the API and, in a second terminal with the same database configuration, start the worker:

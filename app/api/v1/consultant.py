@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -10,9 +11,11 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies.auth import CurrentUser
+from app.core.config import get_settings
 from app.db.models.article import Article
 from app.db.models.article_draft import ArticleDraft
 from app.db.models.consultant import (
+    ConsultantDraftFinding,
     ConsultantDraftRevision,
     ConsultantGeneration,
     ConsultantInterview,
@@ -26,7 +29,9 @@ from app.schemas.consultant import (
     ArticleDetailsInput,
     ConsultantArticleInput,
     CorrectionsInput,
+    DraftFinding,
     ExperienceInput,
+    FindingRepairInput,
     GenerateInput,
     NextQuestion,
     ProfileInput,
@@ -37,6 +42,15 @@ from app.schemas.draft import ArticleDraftUpdate
 from app.schemas.interview_transcript import TranscriptTurn
 from app.schemas.realtime import VoiceSessionCreate
 from app.services import consultant_service as svc
+from app.services.consultant_findings import (
+    anchor_findings,
+    finding_response,
+    locate_paragraph,
+    paragraph_text,
+    persist_findings,
+    replace_paragraph_text,
+)
+from app.services.consultant_writer import ConsultantWriter
 from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import OpenAIRealtimeService
 
@@ -52,6 +66,86 @@ def _matches_version(value: str | None, current: datetime) -> bool:
     except ValueError:
         return False
     return supplied == current
+
+
+async def _owned_active_finding(
+    db: AsyncSession, user: CurrentUser, article_id: UUID, finding_id: UUID, request: Request,
+    *, allow_removed: bool = False,
+) -> tuple[
+    Article, ArticleDraft, ConsultantDraftFinding, dict[str, Any] | None, dict[str, Any] | None
+]:
+    article = await svc.owned_article(db, user.id, article_id, lock=True)
+    draft = await db.scalar(
+        select(ArticleDraft).where(ArticleDraft.article_id == article.id).with_for_update()
+    )
+    if not draft:
+        raise svc.fail("draft_not_found", "Draft not found.", 404)
+    if not _matches_version(request.headers.get("if-unmodified-since"), draft.updated_at):
+        raise svc.fail("draft_conflict", "This draft changed elsewhere. Reload before continuing.")
+    finding = await db.scalar(
+        select(ConsultantDraftFinding).where(
+            ConsultantDraftFinding.id == finding_id,
+            ConsultantDraftFinding.article_id == article.id,
+            ConsultantDraftFinding.draft_id == draft.id,
+        )
+    )
+    if not finding:
+        raise svc.fail("finding_not_found", "Finding not found.", 404)
+    try:
+        section, paragraph, _, _ = locate_paragraph(
+            draft.sections,
+            finding.section_id,
+            finding.paragraph_id,
+            finding.section_index,
+            finding.paragraph_index,
+        )
+    except LookupError as exc:
+        finding.status, finding.resolution_reason = "resolved", "content_removed"
+        if allow_removed:
+            return article, draft, finding, None, None
+        raise svc.fail(
+            "finding_content_removed", "That paragraph is no longer in the draft."
+        ) from exc
+    return article, draft, finding, section, paragraph
+
+
+def _finding_evidence(
+    finding: ConsultantDraftFinding, job: ConsultantGeneration | None
+) -> dict[str, Any]:
+    snapshot = job.snapshot if job else {}
+    turn_ids = set(finding.source_turn_ids)
+    return {
+        "participant_turns": [
+            turn
+            for turn in snapshot.get("turns", [])
+            if turn.get("speaker") == "participant" and turn.get("item_id") in turn_ids
+        ],
+        "external_research": snapshot.get("external_research"),
+    }
+
+
+async def _focused_review(
+    finding: ConsultantDraftFinding,
+    before: str,
+    after: str,
+    section: dict[str, Any],
+    db: AsyncSession,
+) -> list[DraftFinding]:
+    job = (
+        await db.get(ConsultantGeneration, finding.generation_id)
+        if finding.generation_id
+        else None
+    )
+    settings = get_settings()
+    writer = ConsultantWriter(settings, settings.consultant_model)
+    result = await writer.check_focused_repair({
+        "heading": section.get("title", ""),
+        "before": before,
+        "replacement_paragraph": after,
+        "finding": finding_response(finding),
+        **_finding_evidence(finding, job),
+    })
+    return result.findings
 
 
 @router.get("/availability")
@@ -181,6 +275,18 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
             if proposal_job:
                 proposal_jobs[revision.id] = proposal_job
     draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
+    all_findings = (
+        await db.scalars(
+            select(ConsultantDraftFinding).where(
+                ConsultantDraftFinding.article_id == a.id,
+            ).order_by(ConsultantDraftFinding.created_at)
+        )
+    ).all()
+    draft_findings = [
+        finding_response(finding)
+        for finding in all_findings
+        if draft and finding.draft_id == draft.id
+    ]
     return {
         "id": a.id,
         "title": a.working_title,
@@ -190,6 +296,11 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
         "job": svc.job_response(jobs[0]) if jobs else None,
         "sections": draft.sections if draft else [],
         "draft_updated_at": draft.updated_at if draft else None,
+        "findings": draft_findings,
+        "open_finding_count": sum(
+            finding["classification"] == "unsupported" and finding["status"] == "open"
+            for finding in draft_findings
+        ),
         "revisions": [
             {
                 "id": r.id,
@@ -209,6 +320,11 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
                     proposal_jobs[r.id].snapshot.get("external_research", {}).get("sources", [])
                     if proposal_jobs.get(r.id) else []
                 ),
+                "findings": [
+                    finding_response(finding)
+                    for finding in all_findings
+                    if finding.revision_id == r.id
+                ],
             }
             for r in revisions
         ],
@@ -498,6 +614,7 @@ async def answer(
                 ),
                 input=source_json({"article": a.notes, "title": a.working_title, "turns": t.turns}),
                 text_format=NextQuestion,
+                reasoning={"effort": settings.openai_reasoning_effort},
                 store=False,
             )
     except Exception as exc:
@@ -541,6 +658,155 @@ async def save_draft(
     return {"saved": True}
 
 
+@router.post("/articles/{article_id}/findings/{finding_id}/repair-preview")
+async def repair_finding_preview(
+    article_id: UUID,
+    finding_id: UUID,
+    payload: FindingRepairInput,
+    user: CurrentUser,
+    db: DB,
+    request: Request,
+) -> dict[str, Any]:
+    _, draft, finding, section, paragraph = await _owned_active_finding(
+        db, user, article_id, finding_id, request
+    )
+    assert section is not None and paragraph is not None
+    before = paragraph_text(paragraph)
+    after = payload.replacement_paragraph
+    if not after and finding.suggested_replacement:
+        after = (
+            before.replace(finding.claim_text, finding.suggested_replacement, 1)
+            if finding.claim_text and finding.claim_text in before
+            else finding.suggested_replacement
+        )
+    if not after:
+        job = (
+            await db.get(ConsultantGeneration, finding.generation_id)
+            if finding.generation_id
+            else None
+        )
+        settings = get_settings()
+        writer = ConsultantWriter(settings, settings.consultant_model)
+        repaired = await writer.repair_finding({
+            "heading": section.get("title", ""),
+            "paragraph": before,
+            "finding": finding_response(finding),
+            **_finding_evidence(finding, job),
+        })
+        after = repaired.replacement_paragraph
+    focused = await _focused_review(finding, before, after, section, db)
+    classification = (
+        "unsupported"
+        if any(item.classification == "unsupported" for item in focused)
+        else "interpretation" if focused else "supported"
+    )
+    return {
+        "finding_id": finding.id,
+        "before": before,
+        "after": after,
+        "classification": classification,
+        "findings": [item.model_dump(mode="json") for item in focused],
+        "target_version": draft.updated_at.isoformat(),
+    }
+
+
+@router.post("/articles/{article_id}/findings/{finding_id}/apply")
+async def apply_finding_repair(
+    article_id: UUID,
+    finding_id: UUID,
+    payload: FindingRepairInput,
+    user: CurrentUser,
+    db: DB,
+    request: Request,
+) -> dict[str, Any]:
+    if not payload.replacement_paragraph:
+        raise svc.fail("replacement_required", "Approve a replacement before applying it.", 422)
+    article, draft, finding, section, paragraph = await _owned_active_finding(
+        db, user, article_id, finding_id, request
+    )
+    assert section is not None and paragraph is not None
+    before = paragraph_text(paragraph)
+    focused = await _focused_review(
+        finding, before, payload.replacement_paragraph, section, db
+    )
+    sections = copy.deepcopy(draft.sections)
+    _, target, _, _ = locate_paragraph(
+        sections,
+        finding.section_id,
+        finding.paragraph_id,
+        finding.section_index,
+        finding.paragraph_index,
+    )
+    replace_paragraph_text(target, payload.replacement_paragraph)
+    draft.sections = sections
+    finding.status, finding.resolution_reason = "resolved", "repaired"
+    anchored = anchor_findings(
+        [
+            item.model_copy(update={
+                "section_index": finding.section_index,
+                "paragraph_index": finding.paragraph_index,
+            })
+            for item in focused
+        ],
+        sections,
+    )
+    for item in anchored:
+        db.add(ConsultantDraftFinding(
+            id=item.id,
+            article_id=article.id,
+            generation_id=finding.generation_id,
+            draft_id=draft.id,
+            classification=item.classification,
+            category=item.category,
+            section_id=item.section_id,
+            section_index=item.section_index,
+            paragraph_id=item.paragraph_id,
+            paragraph_index=item.paragraph_index,
+            claim_text=item.claim_text,
+            explanation=item.explanation,
+            source_turn_ids=item.source_turn_ids,
+            external_source_ids=item.external_source_ids,
+            suggested_replacement=item.suggested_replacement,
+            status="open",
+        ))
+    await db.flush()
+    await db.refresh(draft)
+    return {
+        "saved": True,
+        "draft_updated_at": draft.updated_at,
+        "findings": [item.model_dump(mode="json") for item in anchored],
+    }
+
+
+@router.post("/articles/{article_id}/findings/{finding_id}/recheck")
+async def recheck_finding(
+    article_id: UUID,
+    finding_id: UUID,
+    user: CurrentUser,
+    db: DB,
+    request: Request,
+) -> dict[str, Any]:
+    _, _, finding, section, paragraph = await _owned_active_finding(
+        db, user, article_id, finding_id, request, allow_removed=True
+    )
+    if section is None or paragraph is None:
+        return {"finding": finding_response(finding)}
+    current = paragraph_text(paragraph)
+    focused = await _focused_review(finding, current, current, section, db)
+    if not focused:
+        finding.status, finding.resolution_reason = "resolved", "rechecked_supported"
+    else:
+        result = focused[0]
+        finding.classification = result.classification or "unsupported"
+        finding.category = result.category
+        finding.claim_text = result.claim_text
+        finding.explanation = result.explanation
+        finding.suggested_replacement = result.suggested_replacement
+        finding.source_turn_ids = result.source_turn_ids
+        finding.external_source_ids = result.external_source_ids
+    return {"finding": finding_response(finding)}
+
+
 @router.post("/articles/{article_id}/revisions/{revision_id}/apply")
 async def apply_revision(
     article_id: UUID, revision_id: UUID, user: CurrentUser, db: DB, request: Request
@@ -580,7 +846,28 @@ async def apply_revision(
                 "stale_proposal",
                 "This draft changed after the suggestion was requested. Generate a new preview.",
             )
+    revision_findings = (
+        await db.scalars(
+            select(ConsultantDraftFinding).where(
+                ConsultantDraftFinding.revision_id == r.id,
+                ConsultantDraftFinding.status == "open",
+            )
+        )
+    ).all()
+    transferred = [
+        DraftFinding.model_validate(finding_response(item)) for item in revision_findings
+    ]
     await svc.save_draft(db, a, r.sections)
+    active_draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
+    if active_draft:
+        await persist_findings(
+            db,
+            article_id=a.id,
+            generation_id=r.generation_id,
+            draft_id=active_draft.id,
+            sections=active_draft.sections,
+            findings=transferred,
+        )
     return {"saved": True}
 
 
