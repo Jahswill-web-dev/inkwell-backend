@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -241,6 +242,18 @@ def test_unsupported_quote_styling_is_converted_to_paraphrase() -> None:
     assert "cheap confusion" in paragraph.text
     assert "“cheap confusion”" not in paragraph.text
     assert paragraph.direct_quotes == []
+
+
+def test_generated_draft_with_anchors_can_be_serialized_for_job_checkpoint() -> None:
+    candidate = draft("A supported paragraph.")
+    candidate.sections[0].section_id = uuid4()
+    candidate.sections[0].paragraphs[0].paragraph_id = uuid4()
+
+    payload = candidate.model_dump(mode="json")
+
+    json.dumps(payload)
+    assert isinstance(payload["sections"][0]["section_id"], str)
+    assert isinstance(payload["sections"][0]["paragraphs"][0]["paragraph_id"], str)
 
 
 def test_consultant_voice_instructions_do_not_use_client_invitation_language() -> None:

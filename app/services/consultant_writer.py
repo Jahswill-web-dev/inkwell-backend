@@ -497,7 +497,7 @@ class ConsultantWriter:
             "Check public facts against external_research findings and cited external_source_ids. "
             "Do not treat a style preference as an accuracy issue. An empty findings list means "
             "the draft passed review.",
-            {**snapshot, "candidate": draft.model_dump()},
+            {**snapshot, "candidate": draft.model_dump(mode="json")},
             max_output_tokens=1600,
             operation_name="check_full",
         )
@@ -523,9 +523,9 @@ class ConsultantWriter:
             affected.append(
                 {
                     "section_index": index,
-                    "section": section.model_dump(),
+                    "section": section.model_dump(mode="json"),
                     "findings": [
-                        finding.model_dump()
+                        finding.model_dump(mode="json")
                         for finding in findings
                         if finding.section_index == index
                     ],
@@ -572,7 +572,7 @@ class ConsultantWriter:
             selected.append(
                 {
                     "section_index": index,
-                    "section": section.model_dump(),
+                    "section": section.model_dump(mode="json"),
                     "participant_turns": [
                         turn
                         for turn in snapshot["turns"]

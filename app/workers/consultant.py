@@ -404,7 +404,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 factory,
                 job_id,
                 token,
-                candidate=candidate.model_dump(),
+                candidate=candidate.model_dump(mode="json"),
                 stage="check",
                 usage=writer.usage,
             )
@@ -429,12 +429,17 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                         "Never retain unsupported advice merely to keep the article's length.",
                         {
                             **model_snapshot,
-                            "candidate": candidate.model_dump(),
+                            "candidate": candidate.model_dump(mode="json"),
                             "issues": [finding.explanation for finding in findings],
                         },
                     )
                     candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
-                    await checkpoint(factory, job_id, token, candidate=candidate.model_dump())
+                    await checkpoint(
+                        factory,
+                        job_id,
+                        token,
+                        candidate=candidate.model_dump(mode="json"),
+                    )
                     check = await writer.check(model_snapshot, candidate)
                     remaining = validate_draft_findings(
                         candidate,
@@ -443,7 +448,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                     )
                     remaining.extend(check.findings)
                     writing_suggestions = remaining
-            candidate_data = candidate.model_dump()
+            candidate_data = candidate.model_dump(mode="json")
             if writing_suggestions:
                 candidate_data["findings"] = [
                     finding.model_dump(mode="json") for finding in writing_suggestions

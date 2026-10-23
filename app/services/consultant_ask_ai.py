@@ -305,7 +305,7 @@ async def prepare_ask_ai(
         check_turns = [turn for turn in snapshot["turns"] if turn["item_id"] in source_ids]
         check_source = {
             "request": snapshot["instruction"],
-            "changed_sections": draft.model_dump()["sections"],
+            "changed_sections": draft.model_dump(mode="json")["sections"],
             "participant_turns": check_turns,
             "external_research": snapshot.get("external_research"),
             "outline": outline(current),
@@ -381,7 +381,7 @@ async def prepare_ask_ai(
                 recheck = await writer.check_article_changes(
                     {
                         **check_source,
-                        "changed_sections": draft.model_dump()["sections"],
+                        "changed_sections": draft.model_dump(mode="json")["sections"],
                         "participant_turns": [
                             turn for turn in snapshot["turns"] if turn["item_id"] in repaired_ids
                         ],
@@ -411,7 +411,7 @@ async def prepare_ask_ai(
             transition_edits = await writer.edit_article_transitions(
                 {
                     "request": snapshot["instruction"],
-                    "findings": [f.model_dump() for f in flow.findings],
+                    "findings": [f.model_dump(mode="json") for f in flow.findings],
                     "targets": [
                         {
                             "section_index": index,
@@ -453,7 +453,7 @@ async def prepare_ask_ai(
                 ai_issues = await writer.check_article_changes(
                     {
                         "request": snapshot["instruction"],
-                        "changed_sections": checked.model_dump()["sections"],
+                        "changed_sections": checked.model_dump(mode="json")["sections"],
                         "participant_turns": [
                             t for t in snapshot["turns"] if t["item_id"] in cited
                         ],
