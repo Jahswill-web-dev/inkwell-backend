@@ -8,6 +8,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from openai import AsyncOpenAI
+from openai.types.live.media_session_config_param import MediaSessionConfigParam
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -256,25 +257,23 @@ class OpenAIRealtimeService:
                     "parallel_tool_calls": False,
                 },
             }
+        session_config: MediaSessionConfigParam = {
+            "model": self._model,
+            "instructions": build_live_voice_instructions(interview, previous_turns),
+            "store": False,
+            "delegation": cast(Any, delegation),
+        }
         try:
             response = await self._client.live.create(
-                session=cast(
-                    Any,
-                    {
-                        "model": self._model,
-                        "instructions": build_live_voice_instructions(interview, previous_turns),
-                        "store": False,
-                        "delegation": delegation,
-                        **(
-                            {"tools": [END_INTERVIEW_TOOL], "tool_choice": "auto"}
-                            if consultant_orchestrated
-                            else {}
-                        ),
-                    },
-                ),
+                session=session_config,
                 transport=cast(Any, {"type": "webrtc", "sdp": sdp}),
             )
         except Exception as exc:
+            logger.exception(
+                "openai_live_session_create_failed model=%s delegation=%s",
+                self._model,
+                delegation.get("type"),
+            )
             raise AppError(
                 status_code=502,
                 code="realtime_connection_failed",
@@ -529,19 +528,7 @@ async def _run_consultant_sideband_controller(
                 return
         if result is None:
             return
-        spoken, next_phase, finish_reason = result
-        if next_phase == "completed":
-            await connection.send(
-                {
-                    "type": "session.instructions.append",
-                    "event_id": f"consultant-complete-{delegation_id}",
-                    "delegation_id": delegation_id,
-                    "content": (
-                        "Backend completion is approved. Say the supplied closing message, "
-                        f"then call end_interview with reason {finish_reason}."
-                    ),
-                }
-            )
+        spoken, _, _ = result
         await connection.send(
             {
                 "type": "session.commentary.append",

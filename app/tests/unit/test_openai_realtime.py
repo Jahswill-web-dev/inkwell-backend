@@ -156,6 +156,7 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
 
     assert "Speak only the application-approved commentary" in compact_delivery
     assert "must not replace its question" in compact_delivery
+    assert "Do not call tools" in compact_delivery
     assert "Follow these phases in order" not in delivery
     assert "greet the consultant by name" in compact_workflow
     assert (
@@ -329,5 +330,6 @@ async def test_consultant_phase_control_uses_client_delegation() -> None:
     session = create.await_args.kwargs["session"]
     assert session["model"] == "gpt-live-1"
     assert session["delegation"] == {"type": "client"}
-    assert session["tools"] == [END_INTERVIEW_TOOL]
+    assert "tools" not in session
+    assert "tool_choice" not in session
     start.assert_called_once()

@@ -155,6 +155,11 @@ def test_voice_completion_requires_backend_phase_session_and_reason(
         f"/api/v1/consultant/interviews/{interview_id}/voice/sessions/"
         f"{session_id}/completion-approval"
     )
+    status_path = path.removesuffix("completion-approval") + "completion-status"
+    assert client.get(status_path, headers=headers).json() == {
+        "approved": False,
+        "reason": None,
+    }
     assert client.post(path, headers=headers, json={"reason": "questions_complete"}).json() == {
         "approved": False,
         "reason": None,
@@ -180,6 +185,10 @@ def test_voice_completion_requires_backend_phase_session_and_reason(
         "reason": None,
     }
     assert client.post(path, headers=headers, json={"reason": "questions_complete"}).json() == {
+        "approved": True,
+        "reason": "questions_complete",
+    }
+    assert client.get(status_path, headers=headers).json() == {
         "approved": True,
         "reason": "questions_complete",
     }

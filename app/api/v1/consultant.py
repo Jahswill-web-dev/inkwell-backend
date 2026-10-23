@@ -633,6 +633,48 @@ async def voice_completion_approval(
     }
 
 
+@router.get(
+    "/interviews/{interview_id}/voice/sessions/{session_id}/completion-status"
+)
+async def voice_completion_status(
+    interview_id: UUID,
+    session_id: UUID,
+    user: CurrentUser,
+    db: DB,
+    request: Request,
+) -> dict[str, Any]:
+    interview = await svc.owned_interview(db, user.id, interview_id)
+    session = await db.scalar(
+        select(VoiceSession).where(
+            VoiceSession.id == session_id,
+            VoiceSession.consultant_interview_id == interview.id,
+        )
+    )
+    if session is None:
+        raise svc.fail("voice_session_not_found", "Voice session not found.", 404)
+    latest = await db.scalar(
+        select(VoiceSession)
+        .where(
+            VoiceSession.consultant_interview_id == interview.id,
+            VoiceSession.status == "connected",
+        )
+        .order_by(VoiceSession.started_at.desc())
+        .limit(1)
+    )
+    completion_reason = (interview.voice_state or {}).get("completion_reason")
+    approved = (
+        request.app.state.settings.consultant_phase_orchestrator_enabled
+        and interview.voice_phase == "completed"
+        and latest is not None
+        and latest.id == session.id
+        and completion_reason in {"participant_finished", "questions_complete"}
+    )
+    return {
+        "approved": approved,
+        "reason": completion_reason if approved else None,
+    }
+
+
 @router.post("/interviews/{interview_id}/answer")
 async def answer(
     interview_id: UUID, payload: TypedAnswer, user: CurrentUser, db: DB, request: Request
