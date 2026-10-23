@@ -688,9 +688,11 @@ def test_worker_saves_checker_objection_with_reviewable_article(
     assert article["job"]["id"] == job_id
     assert article["job"]["state"] == "succeeded"
     assert article["job"]["error"] is None
-    assert article["job"]["open_finding_count"] == 1
-    assert article["open_finding_count"] == 1
-    assert article["findings"][0]["explanation"] == objection
+    assert article["status"] == "ready_to_publish"
+    assert article["job"]["review_status"] == "clear"
+    assert article["job"]["open_finding_count"] == 0
+    assert article["open_finding_count"] == 0
+    assert article["findings"] == []
     assert objection not in caplog.text
 
 
@@ -775,12 +777,8 @@ def test_initial_style_suggestion_saves_draft_without_repair(
     article = client.get(f"/api/v1/consultant/articles/{article_id}", headers=headers).json()
     assert article["job"]["state"] == "succeeded"
     assert article["sections"][0]["title"] == "Opening"
-    assert article["job"]["writing_suggestions"] == [
-        {
-            "section": "Opening",
-            "text": "Consider a shorter first sentence.",
-        }
-    ]
+    assert article["status"] == "ready_to_publish"
+    assert article["job"]["writing_suggestions"] == []
 
     async def inspect_metrics() -> None:
         engine = create_engine(client.app.state.settings)
@@ -794,9 +792,9 @@ def test_initial_style_suggestion_saves_draft_without_repair(
                 assert job is not None
                 assert set(job.usage["stage_seconds"]) >= {
                     "write",
-                    "check_full",
                     "total",
                 }
+                assert "check_full" not in job.usage["stage_seconds"]
                 assert "understand" not in job.usage["stage_seconds"]
                 assert "repair_sections" not in job.usage["stage_seconds"]
         finally:

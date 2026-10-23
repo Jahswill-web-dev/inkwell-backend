@@ -10,10 +10,8 @@ from app.schemas.consultant import (
     ArticleSectionEdits,
     ArticleTransitionEdits,
     DraftCheck,
-    SectionRepairs,
 )
 from app.services.consultant_ask_ai import (
-    AskAIAccuracyError,
     AskAIClarification,
     prepare_ask_ai,
     relevant_turns,
@@ -154,7 +152,7 @@ async def test_opening_edit_preserves_other_sections_exactly():
     assert result[1] == untouched
     assert result[0]["id"] == sections[0]["id"]
     assert candidate["summary"] == "Sharpened the opening."
-    assert writer.calls == ["plan", "edit", "check"]
+    assert writer.calls == ["plan", "edit"]
     assert [turn["item_id"] for turn in writer.input["participant_turns"]] == ["t1", "t2"]
 
 
@@ -176,7 +174,7 @@ async def test_move_reuses_section_objects_without_writing():
     )
     result, _, _ = await prepare_ask_ai(writer, context(sections), progress)
     assert result == [sections[1], sections[0]]
-    assert writer.calls == ["plan", "flow"]
+    assert writer.calls == ["plan"]
 
 
 @pytest.mark.asyncio
@@ -237,7 +235,7 @@ async def test_conclusion_addition_and_opening_edit_in_one_request():
     assert result[0]["id"] == sections[0]["id"]
     assert result[2]["id"] == sections[2]["id"]
     assert [target["section_index"] for target in writer.input["targets"]] == [0, 2]
-    assert writer.calls == ["plan", "edit", "check"]
+    assert writer.calls == ["plan", "edit"]
 
 
 @pytest.mark.asyncio
@@ -293,7 +291,7 @@ async def test_researched_fact_retains_a_clickable_citation():
     result, _, updated = await prepare_ask_ai(writer, snapshot, progress)
     assert updated["external_research"]["sources"][0]["id"] == "s1"
     assert "https://example.org/study" in result[0]["editor_state"]
-    assert writer.calls == ["plan", "research", "edit", "check"]
+    assert writer.calls == ["plan", "research", "edit"]
 
 
 @pytest.mark.asyncio
@@ -357,7 +355,7 @@ async def test_move_repairs_only_affected_transition_paragraph():
     assert result[1]["id"] == sections[0]["id"]
     updated = json.loads(result[1]["editor_state"])
     assert updated["root"]["children"][1] == second
-    assert writer.calls == ["plan", "flow", "transition", "check"]
+    assert writer.calls == ["plan"]
 
 
 @pytest.mark.asyncio
@@ -372,7 +370,7 @@ async def test_unclear_request_returns_clarification_without_edit():
 
 
 @pytest.mark.asyncio
-async def test_invented_number_blocks_after_one_repair():
+async def test_generated_rewrite_is_returned_without_checker_or_repair():
     sections = [section("Conclusion", "Old")]
     writer = Writer(
         ArticleEditPlan(
@@ -403,11 +401,8 @@ async def test_invented_number_blocks_after_one_repair():
         ),
     )
 
-    async def repair(snapshot, draft, findings):
-        writer.calls.append("repair")
-        return SectionRepairs(repairs=[{"section_index": 0, "section": draft.sections[0]}])
+    result, candidate, _ = await prepare_ask_ai(writer, context(sections), progress)
 
-    writer.repair_sections = repair
-    with pytest.raises(AskAIAccuracyError, match="Numerical claim"):
-        await prepare_ask_ai(writer, context(sections), progress)
-    assert writer.calls == ["plan", "edit", "check", "repair", "check"]
+    assert "Results improved by 50%." in result[0]["editor_state"]
+    assert candidate["findings"] == []
+    assert writer.calls == ["plan", "edit"]

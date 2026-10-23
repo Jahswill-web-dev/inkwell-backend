@@ -48,7 +48,6 @@ from app.services.consultant_findings import (
     finding_response,
     locate_paragraph,
     paragraph_text,
-    persist_findings,
     replace_paragraph_text,
 )
 from app.services.consultant_writer import ConsultantWriter
@@ -276,18 +275,6 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
             if proposal_job:
                 proposal_jobs[revision.id] = proposal_job
     draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
-    all_findings = (
-        await db.scalars(
-            select(ConsultantDraftFinding).where(
-                ConsultantDraftFinding.article_id == a.id,
-            ).order_by(ConsultantDraftFinding.created_at)
-        )
-    ).all()
-    draft_findings = [
-        finding_response(finding)
-        for finding in all_findings
-        if draft and finding.draft_id == draft.id
-    ]
     return {
         "id": a.id,
         "title": a.working_title,
@@ -297,11 +284,8 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
         "job": svc.job_response(jobs[0]) if jobs else None,
         "sections": draft.sections if draft else [],
         "draft_updated_at": draft.updated_at if draft else None,
-        "findings": draft_findings,
-        "open_finding_count": sum(
-            finding["classification"] == "unsupported" and finding["status"] == "open"
-            for finding in draft_findings
-        ),
+        "findings": [],
+        "open_finding_count": 0,
         "revisions": [
             {
                 "id": r.id,
@@ -321,11 +305,7 @@ async def article_detail(article_id: UUID, user: CurrentUser, db: DB) -> dict[st
                     proposal_jobs[r.id].snapshot.get("external_research", {}).get("sources", [])
                     if proposal_jobs.get(r.id) else []
                 ),
-                "findings": [
-                    finding_response(finding)
-                    for finding in all_findings
-                    if finding.revision_id == r.id
-                ],
+                "findings": [],
             }
             for r in revisions
         ],
@@ -957,28 +937,7 @@ async def apply_revision(
                 "stale_proposal",
                 "This draft changed after the suggestion was requested. Generate a new preview.",
             )
-    revision_findings = (
-        await db.scalars(
-            select(ConsultantDraftFinding).where(
-                ConsultantDraftFinding.revision_id == r.id,
-                ConsultantDraftFinding.status == "open",
-            )
-        )
-    ).all()
-    transferred = [
-        DraftFinding.model_validate(finding_response(item)) for item in revision_findings
-    ]
     await svc.save_draft(db, a, r.sections)
-    active_draft = await db.scalar(select(ArticleDraft).where(ArticleDraft.article_id == a.id))
-    if active_draft:
-        await persist_findings(
-            db,
-            article_id=a.id,
-            generation_id=r.generation_id,
-            draft_id=active_draft.id,
-            sections=active_draft.sections,
-            findings=transferred,
-        )
     return {"saved": True}
 
 

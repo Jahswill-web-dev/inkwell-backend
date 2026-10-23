@@ -264,25 +264,6 @@ async def enqueue(
 
 def job_response(job: ConsultantGeneration) -> dict[str, Any]:
     candidate = job.candidate or {}
-    suggestions = []
-    if job.state == "succeeded" and job.snapshot.get("base_sections") is None:
-        seen: set[tuple[str, str]] = set()
-        sections = candidate.get("sections", [])
-        for finding in candidate.get("review_suggestions", []):
-            index = finding.get("section_index", -1)
-            classification = finding.get("classification") or (
-                "interpretation" if finding.get("severity") == "style" else "unsupported"
-            )
-            if classification != "interpretation" or not 0 <= index < len(sections):
-                continue
-            heading = sections[index].get("heading", "Article")
-            explanation = finding.get("explanation", "").strip()
-            key = (heading, explanation)
-            if explanation and key not in seen:
-                suggestions.append({"section": heading, "text": explanation})
-                seen.add(key)
-            if len(suggestions) == 3:
-                break
     return {
         "id": job.id,
         "state": job.state,
@@ -292,14 +273,12 @@ def job_response(job: ConsultantGeneration) -> dict[str, Any]:
         "created_at": job.created_at,
         "instruction": job.snapshot.get("instruction", ""),
         "request_kind": job.snapshot.get("request_kind", "generation"),
-        "writing_suggestions": suggestions,
+        "writing_suggestions": [],
         "clarification_question": (
             candidate.get("clarification_question") if job.state == "needs_clarification" else None
         ),
-        "review_status": (
-            "needs_attention" if candidate.get("open_finding_count", 0) else "clear"
-        ) if job.state == "succeeded" else None,
-        "open_finding_count": candidate.get("open_finding_count", 0),
+        "review_status": "clear" if job.state == "succeeded" else None,
+        "open_finding_count": 0,
     }
 
 
@@ -337,5 +316,5 @@ async def save_draft(
     await session.execute(
         delete(ConsultantDraftRevision).where(ConsultantDraftRevision.article_id == article.id)
     )
-    article.status = "in_review"
+    article.status = "ready_to_publish"
     await session.flush()

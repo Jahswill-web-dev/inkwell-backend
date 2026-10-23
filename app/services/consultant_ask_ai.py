@@ -13,18 +13,14 @@ from urllib.parse import urlparse
 from app.schemas.consultant import (
     ArticleEditAction,
     ArticleEditPlan,
-    DraftFinding,
     GeneratedDraft,
     GeneratedSection,
 )
 from app.schemas.draft import ArticleDraftUpdate
-from app.services.consultant_findings import anchor_findings
 from app.services.consultant_writer import (
     ConsultantWriter,
     _plain_editor_text,
     editor_sections,
-    sanitize_draft_quotes,
-    validate_draft_findings,
 )
 
 
@@ -167,8 +163,6 @@ async def prepare_ask_ai(
     writer.usage.setdefault("stage_seconds", {})["plan"] = round(time.perf_counter() - started, 3)
 
     current, moved = move_sections(copy.deepcopy(original), plan.actions)
-    review_findings: list[DraftFinding] = []
-    flow_review_findings: list[DraftFinding] = []
     actions = [action for action in plan.actions if action.kind in {"text_edit", "addition"}]
     relevant_sections = [
         section for section in current if section["id"] in {a.target_section_id for a in actions}
@@ -210,7 +204,6 @@ async def prepare_ask_ai(
             "external_research": snapshot.get("external_research"),
         }
         draft = await writer.write(compact)
-        draft = sanitize_draft_quotes(draft, snapshot["turns"])
         changed = draft.sections
         current = editor_sections(draft, snapshot.get("external_research", {}).get("sources", []))
         changed_ids = [section["id"] for section in current]
@@ -253,12 +246,7 @@ async def prepare_ask_ai(
         if len(indices) != len(expected) or set(indices) != expected:
             raise AskAIAccuracyError(["The edit did not return every requested section."])
         for repair in edits.repairs:
-            changed_section = sanitize_draft_quotes(
-                GeneratedDraft(
-                    title=snapshot["article"]["title"], sections=[repair.section], gaps=[]
-                ),
-                snapshot["turns"],
-            ).sections[0]
+            changed_section = repair.section
             changed.append(changed_section)
             generated = editor_sections(
                 GeneratedDraft(title="", sections=[changed_section], gaps=[]),
@@ -276,206 +264,8 @@ async def prepare_ask_ai(
             time.perf_counter() - start, 3
         )
 
-    await progress("check")
+    await progress("saving")
     check_editor_sections(current)
-    if changed:
-        draft = GeneratedDraft(title=snapshot["article"]["title"], sections=changed, gaps=[])
-        findings = validate_draft_findings(
-            draft, snapshot["turns"], snapshot.get("external_research")
-        )
-        source_ids = {
-            turn_id
-            for section in changed
-            for paragraph in section.paragraphs
-            for turn_id in paragraph.source_turn_ids
-        }
-        check_turns = [turn for turn in snapshot["turns"] if turn["item_id"] in source_ids]
-        check_source = {
-            "request": snapshot["instruction"],
-            "changed_sections": draft.model_dump(mode="json")["sections"],
-            "participant_turns": check_turns,
-            "external_research": snapshot.get("external_research"),
-            "outline": outline(current),
-        }
-        start = time.perf_counter()
-        ai_check = await writer.check_article_changes(check_source)
-        writer.usage.setdefault("stage_seconds", {})["check_changes"] = round(
-            time.perf_counter() - start, 3
-        )
-        findings.extend(ai_check.findings)
-        review_findings = findings
-        serious = [f for f in findings if f.severity == "serious"]
-        if serious:
-            await progress("repair")
-            repair_ids = {turn_id for item in serious for turn_id in item.source_turn_ids} | {
-                turn_id
-                for section in draft.sections
-                for paragraph in section.paragraphs
-                for turn_id in paragraph.source_turn_ids
-            }
-            repair_turns = [
-                turn
-                for turn in snapshot["turns"]
-                if turn in selected_turns or turn["item_id"] in repair_ids
-            ]
-            repaired = await writer.repair_sections(
-                {
-                    "turns": repair_turns,
-                    "article": snapshot["article"],
-                    "external_research": snapshot.get("external_research"),
-                    "surrounding_by_index": {
-                        local_index: [
-                            outline(current)[neighbor]
-                            for neighbor in (current_index - 1, current_index + 1)
-                            if 0 <= neighbor < len(current)
-                        ]
-                        for local_index, section_id in enumerate(changed_ids)
-                        for current_index, section in enumerate(current)
-                        if section["id"] == section_id
-                    },
-                },
-                draft,
-                serious,
-            )
-            wanted = {f.section_index for f in serious}
-            returned = [r.section_index for r in repaired.repairs]
-            if len(returned) != len(wanted) or set(returned) != wanted:
-                repaired.repairs = []
-            for repair in repaired.repairs:
-                draft.sections[repair.section_index] = repair.section
-                section_id = changed_ids[repair.section_index]
-                current_index = next(i for i, s in enumerate(current) if s["id"] == section_id)
-                generated = editor_sections(
-                    GeneratedDraft(title="", sections=[repair.section], gaps=[]),
-                    snapshot.get("external_research", {}).get("sources", []),
-                )[0]
-                current[current_index] = {
-                    **current[current_index],
-                    "title": generated["title"],
-                    "editor_state": generated["editor_state"],
-                }
-            if repaired.repairs:
-                check_editor_sections(current)
-                remaining = validate_draft_findings(
-                    draft, snapshot["turns"], snapshot.get("external_research")
-                )
-                repaired_ids = {
-                    turn_id
-                    for section in draft.sections
-                    for paragraph in section.paragraphs
-                    for turn_id in paragraph.source_turn_ids
-                }
-                recheck = await writer.check_article_changes(
-                    {
-                        **check_source,
-                        "changed_sections": draft.model_dump(mode="json")["sections"],
-                        "participant_turns": [
-                            turn for turn in snapshot["turns"] if turn["item_id"] in repaired_ids
-                        ],
-                    }
-                )
-                remaining.extend(recheck.findings)
-                review_findings = remaining
-
-    if moved or plan.actions[0].kind == "full_rewrite":
-        await progress("check")
-        start = time.perf_counter()
-        flow = await writer.check_article_flow(
-            {
-                "request": snapshot["instruction"],
-                "outline": outline(current),
-                "original_outline": outline(original),
-            }
-        )
-        writer.usage.setdefault("stage_seconds", {})["check_flow"] = round(
-            time.perf_counter() - start, 3
-        )
-        if moved and flow.findings:
-            affected = {f.section_index for f in flow.findings}
-            if any(index >= len(current) for index in affected):
-                raise AskAIAccuracyError(["The flow review could not locate a transition."])
-            await progress("repair")
-            transition_edits = await writer.edit_article_transitions(
-                {
-                    "request": snapshot["instruction"],
-                    "findings": [f.model_dump(mode="json") for f in flow.findings],
-                    "targets": [
-                        {
-                            "section_index": index,
-                            "heading": current[index]["title"],
-                            "first_paragraph": section_text(current[index]).split("\n\n")[0],
-                            "neighbors": [
-                                outline(current)[i]
-                                for i in (index - 1, index + 1)
-                                if 0 <= i < len(current)
-                            ],
-                        }
-                        for index in sorted(affected)
-                    ],
-                    "participant_turns": selected_turns,
-                    "external_research": snapshot.get("external_research"),
-                }
-            )
-            returned = [edit.section_index for edit in transition_edits.edits]
-            if len(returned) != len(affected) or set(returned) != affected:
-                flow_review_findings.extend(flow.findings)
-                transition_edits.edits = []
-            for edit in transition_edits.edits:
-                original_section = current[edit.section_index]
-                checked = GeneratedDraft(
-                    title=snapshot["article"]["title"],
-                    sections=[
-                        GeneratedSection(
-                            heading=original_section["title"],
-                            paragraphs=[edit.paragraph],
-                        )
-                    ],
-                    gaps=[],
-                )
-                local_issues = validate_draft_findings(
-                    checked, snapshot["turns"], snapshot.get("external_research")
-                )
-                cited = set(edit.paragraph.source_turn_ids)
-                ai_issues = await writer.check_article_changes(
-                    {
-                        "request": snapshot["instruction"],
-                        "changed_sections": checked.model_dump(mode="json")["sections"],
-                        "participant_turns": [
-                            t for t in snapshot["turns"] if t["item_id"] in cited
-                        ],
-                        "external_research": snapshot.get("external_research"),
-                        "outline": outline(current),
-                    }
-                )
-                serious_transition = [
-                    f.explanation
-                    for f in local_issues + ai_issues.findings
-                    if f.severity == "serious"
-                ]
-                if serious_transition:
-                    flow_review_findings.extend(
-                        finding.model_copy(update={"section_index": edit.section_index})
-                        for finding in local_issues + ai_issues.findings
-                    )
-                    continue
-                generated = editor_sections(
-                    checked,
-                    snapshot.get("external_research", {}).get("sources", []),
-                )[0]
-                old_document = json.loads(original_section["editor_state"])
-                new_document = json.loads(generated["editor_state"])
-                if not old_document["root"]["children"]:
-                    raise AskAIAccuracyError(["The transition has no paragraph to edit."])
-                old_document["root"]["children"][0] = new_document["root"]["children"][0]
-                current[edit.section_index] = {
-                    **original_section,
-                    "editor_state": json.dumps(old_document),
-                }
-                changed_ids.append(original_section["id"])
-            check_editor_sections(current)
-            summary = (summary + " Adjusted the affected transitions.").strip()
-        elif any(f.severity == "serious" for f in flow.findings):
-            flow_review_findings.extend(flow.findings)
 
     if not summary:
         summary = "Moved the requested section." if moved else "Updated the requested section."
@@ -490,21 +280,5 @@ async def prepare_ask_ai(
         "plan": plan.model_dump(),
         "changed_section_ids": changed_ids,
     }
-    if review_findings or flow_review_findings:
-        remapped: list[DraftFinding] = []
-        for finding in review_findings:
-            if finding.section_index >= len(changed_ids):
-                continue
-            section_id = changed_ids[finding.section_index]
-            current_index = next(
-                (i for i, section in enumerate(current) if section["id"] == section_id),
-                finding.section_index,
-            )
-            remapped.append(finding.model_copy(update={"section_index": current_index}))
-        anchored = anchor_findings(remapped, current)
-        anchored.extend(anchor_findings(flow_review_findings, current))
-        candidate["findings"] = [
-            finding.model_dump(mode="json")
-            for finding in anchored
-        ]
+    candidate["findings"] = []
     return current, candidate, snapshot

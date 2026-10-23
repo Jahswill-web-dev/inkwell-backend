@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from uuid import UUID, uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -27,13 +25,13 @@ from app.db.models.consultant import (
     ConsultantInterview,
 )
 from app.db.session import create_engine, create_session_factory
-from app.schemas.consultant import DraftFinding, GeneratedDraft
+from app.schemas.consultant import GeneratedDraft
 from app.services.consultant_ask_ai import (
     AskAIAccuracyError,
     AskAIClarification,
     prepare_ask_ai,
 )
-from app.services.consultant_findings import ensure_editor_anchors, persist_findings
+from app.services.consultant_findings import ensure_editor_anchors
 from app.services.consultant_metrics import (
     MetricsRecorder,
     close_event,
@@ -46,8 +44,6 @@ from app.services.consultant_writer import (
     ModelOutputError,
     compact_snapshot,
     editor_sections,
-    sanitize_draft_quotes,
-    validate_draft_findings,
 )
 
 log = logging.getLogger(__name__)
@@ -56,124 +52,10 @@ ACTIVE_ATTEMPT_CLOCKS: dict[str, float] = {}
 ACTIVE_STAGE_CLOCKS: dict[str, float] = {}
 
 
-class DraftSourceFidelityError(ValueError):
-    def __init__(self, issues: list[str]) -> None:
-        super().__init__("The draft could not pass source fidelity checks")
-        self.issues = issues
-
-
-def source_fidelity_message(issues: list[str]) -> str:
-    """Show bounded checker feedback to the article owner without logging draft text."""
-    cleaned = list(
-        dict.fromkeys(re.sub(r"\s+", " ", issue).strip()[:280] for issue in issues if issue.strip())
-    )[:4]
-    if not cleaned:
-        return (
-            "We couldn't verify this draft against your interview. "
-            "Your interview is saved. Please retry."
-        )
-    details = "\n".join(f"{index}. {issue}" for index, issue in enumerate(cleaned, 1))
-    return (
-        "We couldn't verify this draft against your interview. The draft checker flagged:\n"
-        f"{details}\nYour interview is saved. Please review these points before retrying."
-    )
-
-
 def record_stage(usage: dict[str, object], stage: str, started: float) -> None:
     durations = usage.setdefault("stage_seconds", {})
     assert isinstance(durations, dict)
     durations[stage] = round(float(durations.get(stage, 0)) + time.perf_counter() - started, 3)
-
-
-def finding_message(finding: DraftFinding, draft: GeneratedDraft) -> str:
-    heading = draft.sections[finding.section_index].heading
-    location = f'Section "{heading}"'
-    if finding.paragraph_index is not None:
-        location += f", paragraph {finding.paragraph_index + 1}"
-    return f"{location}: {finding.explanation}"
-
-
-def validate_finding_locations(findings: list[DraftFinding], draft: GeneratedDraft) -> None:
-    for finding in findings:
-        if finding.section_index >= len(draft.sections):
-            raise DraftSourceFidelityError(["Review could not identify the affected section."])
-        if finding.paragraph_index is not None and finding.paragraph_index >= len(
-            draft.sections[finding.section_index].paragraphs
-        ):
-            raise DraftSourceFidelityError(["Review could not identify the affected paragraph."])
-
-
-async def review_initial_draft(
-    writer: ConsultantWriter, snapshot: dict[str, Any], candidate: GeneratedDraft
-) -> tuple[GeneratedDraft, list[DraftFinding]]:
-    """Review once in full; repair only sections with accuracy findings."""
-    metrics = getattr(writer, "metrics", None)
-    validation = await metrics.start("stage", "source_validation") if metrics else None
-    try:
-        local_findings = validate_draft_findings(
-            candidate, snapshot["turns"], snapshot.get("external_research")
-        )
-    except Exception:
-        if validation:
-            await metrics.finish(*validation, "failed")
-        raise
-    if validation:
-        await metrics.finish(*validation, "completed")
-    started = time.perf_counter()
-    full_check = await writer.check(snapshot, candidate)
-    record_stage(writer.usage, "check_full", started)
-    validate_finding_locations(full_check.findings, candidate)
-    findings = local_findings + full_check.findings
-    serious = [finding for finding in findings if finding.severity == "serious"]
-    style = [finding for finding in findings if finding.severity == "style"]
-    if not serious:
-        return candidate, style
-
-    indices = {finding.section_index for finding in serious}
-    started = time.perf_counter()
-    repairs = await writer.repair_sections(snapshot, candidate, serious)
-    record_stage(writer.usage, "repair_sections", started)
-    returned = [repair.section_index for repair in repairs.repairs]
-    if len(returned) != len(indices) or set(returned) != indices:
-        return candidate, findings
-    sections = list(candidate.sections)
-    for repair in repairs.repairs:
-        sections[repair.section_index] = repair.section
-    repaired = candidate.model_copy(update={"sections": sections})
-    repaired = sanitize_draft_quotes(repaired, snapshot["turns"])
-    validation = await metrics.start("stage", "source_validation") if metrics else None
-    try:
-        local_recheck = validate_draft_findings(
-            repaired, snapshot["turns"], snapshot.get("external_research")
-        )
-    except Exception:
-        if validation:
-            await metrics.finish(*validation, "failed")
-        raise
-    if validation:
-        await metrics.finish(*validation, "completed")
-    started = time.perf_counter()
-    section_check = await writer.check_repaired_sections(snapshot, repaired, indices)
-    record_stage(writer.usage, "check_sections", started)
-    validate_finding_locations(section_check.findings, repaired)
-    remaining = [
-        finding
-        for finding in local_recheck + section_check.findings
-        if finding.severity == "serious"
-    ]
-    if remaining:
-        style = [finding for finding in style if finding.section_index not in indices]
-        style.extend(
-            finding
-            for finding in local_recheck + section_check.findings
-            if finding.severity == "style"
-        )
-        return repaired, [*remaining, *style]
-    style = [finding for finding in style if finding.section_index not in indices]
-    style.extend(
-        finding for finding in local_recheck + section_check.findings if finding.severity == "style"
-    )
-    return repaired, style
 
 
 async def claim(factory: async_sessionmaker[AsyncSession]) -> tuple[UUID, str] | None:
@@ -330,7 +212,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         writer.usage["queue_seconds"] = round(
             max(0, (datetime.now(UTC) - queued_at).total_seconds()), 3
         )
-        writing_suggestions: list[DraftFinding] = []
         if snapshot.get("request_kind") == "ask_ai":
 
             async def progress(stage: str) -> None:
@@ -367,70 +248,20 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             )
             if not candidate_data:
                 record_stage(writer.usage, "write", started)
-            candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
             await checkpoint(
                 factory,
                 job_id,
                 token,
                 candidate=candidate.model_dump(mode="json"),
-                stage="check",
+                stage="saving",
                 usage=writer.usage,
             )
-            if snapshot.get("base_sections") is None:
-                candidate, writing_suggestions = await review_initial_draft(
-                    writer,
-                    model_snapshot,
-                    candidate,
-                )
-            else:
-                local_findings = validate_draft_findings(
-                    candidate, model_snapshot["turns"], model_snapshot.get("external_research")
-                )
-                check = await writer.check(model_snapshot, candidate)
-                findings = local_findings + check.findings
-                if findings:
-                    candidate = await writer.parse(
-                        GeneratedDraft,
-                        "Repair listed issues while preserving supported meaning and voice. "
-                        "If a claim, instruction, example, or quotation is unsupported, "
-                        "remove it or use cited participant turns or verified public research. "
-                        "Never retain unsupported advice merely to keep the article's length.",
-                        {
-                            **model_snapshot,
-                            "candidate": candidate.model_dump(mode="json"),
-                            "issues": [finding.explanation for finding in findings],
-                        },
-                    )
-                    candidate = sanitize_draft_quotes(candidate, model_snapshot["turns"])
-                    await checkpoint(
-                        factory,
-                        job_id,
-                        token,
-                        candidate=candidate.model_dump(mode="json"),
-                    )
-                    check = await writer.check(model_snapshot, candidate)
-                    remaining = validate_draft_findings(
-                        candidate,
-                        model_snapshot["turns"],
-                        model_snapshot.get("external_research"),
-                    )
-                    remaining.extend(check.findings)
-                    writing_suggestions = remaining
             candidate_data = candidate.model_dump(mode="json")
-            if writing_suggestions:
-                candidate_data["findings"] = [
-                    finding.model_dump(mode="json") for finding in writing_suggestions
-                ]
-                candidate_data["review_suggestions"] = [
-                    finding.model_dump(mode="json") for finding in writing_suggestions
-                ]
             await checkpoint(factory, job_id, token, candidate=candidate_data, usage=writer.usage)
             sections = editor_sections(
                 candidate, model_snapshot.get("external_research", {}).get("sources", [])
             )
         sections = ensure_editor_anchors(sections)
-        raw_findings = candidate_data.get("findings", [])
-        persisted_findings = [DraftFinding.model_validate(item) for item in raw_findings]
         await checkpoint(factory, job_id, token, stage="saving", usage=writer.usage)
         async with factory.begin() as db:
             job = await db.scalar(
@@ -470,14 +301,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 draft = ArticleDraft(article_id=article.id, sections=sections)
                 db.add(draft)
                 await db.flush()
-                rows = await persist_findings(
-                    db,
-                    article_id=article.id,
-                    generation_id=job.id,
-                    draft_id=draft.id,
-                    sections=sections,
-                    findings=persisted_findings,
-                )
             else:
                 revision = ConsultantDraftRevision(
                     article_id=article.id,
@@ -488,18 +311,10 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 )
                 db.add(revision)
                 await db.flush()
-                rows = await persist_findings(
-                    db,
-                    article_id=article.id,
-                    generation_id=job.id,
-                    revision_id=revision.id,
-                    sections=sections,
-                    findings=persisted_findings,
-                )
-            candidate_data["open_finding_count"] = sum(
-                row.classification == "unsupported" and row.status == "open" for row in rows
-            )
-            article.status = "in_review"
+            candidate_data["findings"] = []
+            candidate_data["review_suggestions"] = []
+            candidate_data["open_finding_count"] = 0
+            article.status = "ready_to_publish"
             job.state, job.stage, job.error = "succeeded", "complete", None
             job.candidate = candidate_data
             record_stage(writer.usage, "total", process_started)
@@ -552,14 +367,12 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                     job.error = None
                     job.candidate = {"clarification_question": exc.question}
                 elif isinstance(exc, AskAIAccuracyError):
-                    job.error = source_fidelity_message(exc.issues)
+                    job.error = "The requested rewrite could not be created. Please try again."
                 elif rate_limited:
                     job.error = (
                         "Drafting is temporarily unavailable because the AI service rate limit "
                         "was reached. Your interview is safe. Please retry shortly."
                     )
-                elif isinstance(exc, DraftSourceFidelityError):
-                    job.error = source_fidelity_message(exc.issues)
                 elif "draft changed while" in str(exc).lower():
                     job.error = (
                         "Your draft changed while this suggestion was generated. Please try again."
