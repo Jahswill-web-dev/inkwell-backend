@@ -56,7 +56,7 @@ class ConsultantGeneration(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     request_key: Mapped[str] = mapped_column(String(120))
     state: Mapped[str] = mapped_column(String(24), default="queued", index=True)
-    stage: Mapped[str] = mapped_column(String(24), default="understand")
+    stage: Mapped[str] = mapped_column(String(24), default="write")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)

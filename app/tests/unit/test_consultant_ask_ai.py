@@ -10,13 +10,13 @@ from app.schemas.consultant import (
     ArticleSectionEdits,
     ArticleTransitionEdits,
     DraftCheck,
-    Evidence,
     SectionRepairs,
 )
 from app.services.consultant_ask_ai import (
     AskAIAccuracyError,
     AskAIClarification,
     prepare_ask_ai,
+    relevant_turns,
 )
 
 
@@ -85,18 +85,36 @@ def context(sections):
     }
 
 
-def evidence():
-    return Evidence(
-        argument="Own the handoff",
-        claims=[],
-        outline=[],
-        gaps=[],
-        voice={"excerpts": ["Start with the costly handoff."]},
-    )
-
-
 async def progress(stage):
     return None
+
+
+def test_relevant_turns_are_selected_directly_from_transcript_overlap():
+    sections = [section("Experience", "Add the participant's personal project experience")]
+    actions = [
+        ArticleEditPlan(
+            actions=[
+                {
+                    "kind": "text_edit",
+                    "target_section_id": sections[0]["id"],
+                    "instruction": "Keep the personal experience",
+                }
+            ]
+        ).actions[0]
+    ]
+    turns = [
+        {
+            "item_id": f"t{index}",
+            "speaker": "participant",
+            "text": "Generic handoff advice" if index < 13 else "My personal project experience",
+        }
+        for index in range(1, 14)
+    ]
+
+    selected = relevant_turns(sections, actions, turns)
+
+    assert selected[0]["item_id"] == "t13"
+    assert len(selected) == 12
 
 
 @pytest.mark.asyncio
@@ -132,7 +150,7 @@ async def test_opening_edit_preserves_other_sections_exactly():
             summary="Sharpened the opening.",
         ),
     )
-    result, candidate, _ = await prepare_ask_ai(writer, context(sections), evidence(), progress)
+    result, candidate, _ = await prepare_ask_ai(writer, context(sections), progress)
     assert result[1] == untouched
     assert result[0]["id"] == sections[0]["id"]
     assert candidate["summary"] == "Sharpened the opening."
@@ -156,7 +174,7 @@ async def test_move_reuses_section_objects_without_writing():
             ]
         )
     )
-    result, _, _ = await prepare_ask_ai(writer, context(sections), evidence(), progress)
+    result, _, _ = await prepare_ask_ai(writer, context(sections), progress)
     assert result == [sections[1], sections[0]]
     assert writer.calls == ["plan", "flow"]
 
@@ -214,7 +232,7 @@ async def test_conclusion_addition_and_opening_edit_in_one_request():
             ]
         ),
     )
-    result, _, _ = await prepare_ask_ai(writer, context(sections), evidence(), progress)
+    result, _, _ = await prepare_ask_ai(writer, context(sections), progress)
     assert result[1] == sections[1]
     assert result[0]["id"] == sections[0]["id"]
     assert result[2]["id"] == sections[2]["id"]
@@ -272,7 +290,7 @@ async def test_researched_fact_retains_a_clickable_citation():
     writer.research = research
     snapshot = context(sections)
     snapshot["instruction"] = "Add a sourced public example"
-    result, _, updated = await prepare_ask_ai(writer, snapshot, evidence(), progress)
+    result, _, updated = await prepare_ask_ai(writer, snapshot, progress)
     assert updated["external_research"]["sources"][0]["id"] == "s1"
     assert "https://example.org/study" in result[0]["editor_state"]
     assert writer.calls == ["plan", "research", "edit", "check"]
@@ -334,7 +352,7 @@ async def test_move_repairs_only_affected_transition_paragraph():
 
     writer.check_article_flow = flow
     writer.edit_article_transitions = transition
-    result, _, _ = await prepare_ask_ai(writer, context(sections), evidence(), progress)
+    result, _, _ = await prepare_ask_ai(writer, context(sections), progress)
     assert result[0] == sections[1]
     assert result[1]["id"] == sections[0]["id"]
     updated = json.loads(result[1]["editor_state"])
@@ -349,7 +367,7 @@ async def test_unclear_request_returns_clarification_without_edit():
         ArticleEditPlan(clarification_question="Which point should I add to the conclusion?")
     )
     with pytest.raises(AskAIClarification, match="Which point"):
-        await prepare_ask_ai(writer, context(sections), evidence(), progress)
+        await prepare_ask_ai(writer, context(sections), progress)
     assert writer.calls == ["plan"]
 
 
@@ -391,5 +409,5 @@ async def test_invented_number_blocks_after_one_repair():
 
     writer.repair_sections = repair
     with pytest.raises(AskAIAccuracyError, match="Numerical claim"):
-        await prepare_ask_ai(writer, context(sections), evidence(), progress)
+        await prepare_ask_ai(writer, context(sections), progress)
     assert writer.calls == ["plan", "edit", "check", "repair", "check"]

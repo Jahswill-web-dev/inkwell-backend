@@ -306,7 +306,6 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
         ArticleEditPlan,
         ArticleSectionEdits,
         DraftCheck,
-        Evidence,
     )
     from app.workers import consultant as worker
 
@@ -327,23 +326,16 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
             ]
         },
     )
-    job_id = client.post(path + "/finish", headers=h).json()["id"]
+    queued = client.post(path + "/finish", headers=h).json()
+    job_id = queued["id"]
+    assert queued["stage"] == "write"
 
     class FakeWriter:
         def __init__(self, *args: object) -> None:
             self.client = SimpleNamespace(close=AsyncMock())
             self.usage = {"input_tokens": 0, "output_tokens": 0}
 
-        async def understand(self, snapshot: dict[str, Any]) -> Evidence:
-            return Evidence(
-                argument="Fix handoffs",
-                claims=[],
-                outline=["Ownership"],
-                gaps=[],
-                voice={"excerpts": ["expensive confusion"]},
-            )
-
-        async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+        async def write(self, snapshot: dict[str, Any]) -> GeneratedDraft:
             return GeneratedDraft(
                 title="Handoffs",
                 sections=[
@@ -450,18 +442,18 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     assert requested.status_code == 200, requested.text
     assert requested.json()["stage"] == "plan"
 
-    async def inspect_reused_evidence() -> None:
+    async def inspect_direct_draft_job() -> None:
         engine = create_engine(client.app.state.settings)
         try:
             async with create_session_factory(engine)() as db:
-                original = await db.get(ConsultantGeneration, UUID(job_id))
                 rewrite_job = await db.get(ConsultantGeneration, UUID(requested.json()["id"]))
-                assert original is not None and rewrite_job is not None
-                assert rewrite_job.evidence == original.evidence
+                assert rewrite_job is not None
+                assert rewrite_job.evidence is None
+                assert rewrite_job.stage == "plan"
         finally:
             await engine.dispose()
 
-    asyncio.run(inspect_reused_evidence())
+    asyncio.run(inspect_direct_draft_job())
     assert (
         client.post(
             ai_path,
@@ -515,13 +507,13 @@ def test_worker_claim_recovery_and_proposals_preserve_manual_edits(
     assert applied["revisions"] == []
 
 
-def test_worker_shows_checker_objection_on_failed_article(
+def test_worker_saves_checker_objection_with_reviewable_article(
     consultant_client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from app.schemas.consultant import DraftCheck, Evidence, SectionRepairs
+    from app.schemas.consultant import DraftCheck, SectionRepairs
     from app.workers import consultant as worker
 
     client = consultant_client
@@ -549,10 +541,7 @@ def test_worker_shows_checker_objection_on_failed_article(
             self.client = SimpleNamespace(close=AsyncMock())
             self.usage = {"input_tokens": 0, "output_tokens": 0}
 
-        async def understand(self, snapshot: dict[str, Any]) -> Evidence:
-            return Evidence(argument="Fix handoffs", claims=[], outline=[], gaps=[], voice={})
-
-        async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+        async def write(self, snapshot: dict[str, Any]) -> GeneratedDraft:
             return GeneratedDraft(
                 title="Handoffs",
                 sections=[
@@ -622,26 +611,12 @@ def test_worker_shows_checker_objection_on_failed_article(
     asyncio.run(run_worker())
     article = client.get(f"/api/v1/consultant/articles/{article_id}", headers=headers).json()
     assert article["job"]["id"] == job_id
-    assert article["job"]["state"] == "failed"
-    assert objection in article["job"]["error"]
+    assert article["job"]["state"] == "succeeded"
+    assert article["job"]["error"] is None
+    assert article["job"]["open_finding_count"] == 1
+    assert article["open_finding_count"] == 1
+    assert article["findings"][0]["explanation"] == objection
     assert objection not in caplog.text
-    retried = client.post(f"/api/v1/consultant/jobs/{job_id}/retry", headers=headers)
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["state"] == "queued"
-    assert retried.json()["stage"] == "write"
-
-    async def inspect_retry() -> None:
-        engine = create_engine(client.app.state.settings)
-        try:
-            async with create_session_factory(engine)() as db:
-                job = await db.get(ConsultantGeneration, UUID(job_id))
-                assert job is not None
-                assert job.evidence is not None
-                assert job.candidate is None
-        finally:
-            await engine.dispose()
-
-    asyncio.run(inspect_retry())
 
 
 def test_initial_style_suggestion_saves_draft_without_repair(
@@ -650,7 +625,7 @@ def test_initial_style_suggestion_saves_draft_without_repair(
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from app.schemas.consultant import DraftCheck, Evidence
+    from app.schemas.consultant import DraftCheck
     from app.workers import consultant as worker
 
     client = consultant_client
@@ -677,10 +652,7 @@ def test_initial_style_suggestion_saves_draft_without_repair(
             self.client = SimpleNamespace(close=AsyncMock())
             self.usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
 
-        async def understand(self, snapshot: dict[str, Any]) -> Evidence:
-            return Evidence(argument="Fix handoffs", claims=[], outline=[], gaps=[], voice={})
-
-        async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+        async def write(self, snapshot: dict[str, Any]) -> GeneratedDraft:
             return GeneratedDraft(
                 title="Handoffs",
                 sections=[
@@ -746,11 +718,11 @@ def test_initial_style_suggestion_saves_draft_without_repair(
                 )
                 assert job is not None
                 assert set(job.usage["stage_seconds"]) >= {
-                    "understand",
                     "write",
                     "check_full",
                     "total",
                 }
+                assert "understand" not in job.usage["stage_seconds"]
                 assert "repair_sections" not in job.usage["stage_seconds"]
         finally:
             await engine.dispose()

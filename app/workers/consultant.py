@@ -27,7 +27,7 @@ from app.db.models.consultant import (
     ConsultantInterview,
 )
 from app.db.session import create_engine, create_session_factory
-from app.schemas.consultant import DraftFinding, Evidence, GeneratedDraft
+from app.schemas.consultant import DraftFinding, GeneratedDraft
 from app.services.consultant_ask_ai import (
     AskAIAccuracyError,
     AskAIClarification,
@@ -47,9 +47,7 @@ from app.services.consultant_writer import (
     compact_snapshot,
     editor_sections,
     sanitize_draft_quotes,
-    sanitize_evidence,
     validate_draft_findings,
-    validate_evidence,
 )
 
 log = logging.getLogger(__name__)
@@ -323,7 +321,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             assert job is not None
             snapshot, model = job.snapshot, job.model_id
             previous_usage = job.usage
-            evidence_data, candidate_data = job.evidence, job.candidate
+            candidate_data = job.candidate
             queued_at = job.created_at
         model_snapshot = compact_snapshot(snapshot)
         writer = ConsultantWriter(settings, model)
@@ -332,17 +330,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         writer.usage["queue_seconds"] = round(
             max(0, (datetime.now(UTC) - queued_at).total_seconds()), 3
         )
-        started = time.perf_counter()
-        evidence = (
-            Evidence.model_validate(evidence_data)
-            if evidence_data
-            else await writer.understand(model_snapshot)
-        )
-        if not evidence_data:
-            record_stage(writer.usage, "understand", started)
-        await checkpoint(factory, job_id, token, stage="validation", usage=writer.usage)
-        evidence = sanitize_evidence(evidence, model_snapshot["turns"])
-        validate_evidence(evidence, model_snapshot["turns"])
         writing_suggestions: list[DraftFinding] = []
         if snapshot.get("request_kind") == "ask_ai":
 
@@ -352,7 +339,6 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             sections, candidate_data, ai_snapshot = await prepare_ask_ai(
                 writer,
                 {**snapshot, "turns": model_snapshot["turns"]},
-                evidence,
                 progress,
             )
             if ai_snapshot.get("external_research"):
@@ -362,32 +348,14 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                 job_id,
                 token,
                 snapshot=snapshot,
-                evidence=evidence.model_dump(),
                 candidate=candidate_data,
                 usage=writer.usage,
             )
         else:
-            needs_research = bool(
-                re.search(
-                    r"\b(source|sources|citations?|research|stud(?:y|ies)|statistics?|"
-                    r"real.world|case stud(?:y|ies)|public example)\b",
-                    str(snapshot.get("instruction", "")),
-                    re.IGNORECASE,
-                )
-            )
-            if needs_research and "external_research" not in snapshot:
-                await checkpoint(factory, job_id, token, stage="research", usage=writer.usage)
-                research = await writer.research(model_snapshot)
-                snapshot = {**snapshot, "external_research": research}
-                model_snapshot["external_research"] = research
-                await checkpoint(factory, job_id, token, snapshot=snapshot, usage=writer.usage)
-            elif snapshot.get("external_research"):
-                model_snapshot["external_research"] = snapshot["external_research"]
             await checkpoint(
                 factory,
                 job_id,
                 token,
-                evidence=evidence.model_dump(),
                 stage="write",
                 usage=writer.usage,
             )
@@ -395,7 +363,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             candidate = (
                 GeneratedDraft.model_validate(candidate_data)
                 if candidate_data
-                else await writer.write(model_snapshot, evidence.model_dump())
+                else await writer.write(model_snapshot)
             )
             if not candidate_data:
                 record_stage(writer.usage, "write", started)
@@ -411,7 +379,7 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
             if snapshot.get("base_sections") is None:
                 candidate, writing_suggestions = await review_initial_draft(
                     writer,
-                    {**model_snapshot, "evidence": {"argument": evidence.argument}},
+                    model_snapshot,
                     candidate,
                 )
             else:

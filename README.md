@@ -179,8 +179,8 @@ uv run alembic upgrade head
 Local development uses two backend processes:
 
 - The **API** handles browser requests, authentication, interviews, and queues generation jobs.
-- The **consultant worker** picks up queued jobs and runs the understand, write, and check stages that
-  produce consultant drafts.
+- The **consultant worker** picks up queued jobs and writes directly from the interview transcript,
+  then checks and, when needed, repairs consultant drafts.
 
 Open two PowerShell terminals in the backend directory. Start the API in the first terminal:
 
@@ -1660,7 +1660,7 @@ OPENAI_REASONING_EFFORT=medium
 OPENAI_REALTIME_REQUEST_TIMEOUT_SECONDS=20
 ```
 
-`CONSULTANT_MODEL` controls the understand/write/check pipeline independently of marketing models.
+`CONSULTANT_MODEL` controls the write/check/repair pipeline independently of marketing models.
 Typed follow-up questions and delegated voice workflow use `OPENAI_INTERVIEW_QUESTION_MODEL`.
 Reusable knowledge extraction uses `OPENAI_KNOWLEDGE_EXTRACTION_MODEL`. Applicable OpenAI Responses
 calls use `OPENAI_REASONING_EFFORT`. Consultant voice uses OpenAI live

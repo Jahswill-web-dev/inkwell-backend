@@ -8,13 +8,12 @@ from uuid import uuid4
 
 import pytest
 
-from app.prompts.consultant import PROMPT_VERSION, WRITING_POLICY
+from app.prompts.consultant import DIRECT_DRAFT_INSTRUCTION, PROMPT_VERSION, WRITING_POLICY
 from app.schemas.auth import RegisterRequest
 from app.schemas.consultant import (
     ConsultantArticleInput,
     DraftCheck,
     DraftFinding,
-    Evidence,
     GeneratedDraft,
     SectionRepairs,
 )
@@ -23,11 +22,10 @@ from app.services.consultant_service import effective_turns
 from app.services.consultant_writer import (
     ConsultantWriter,
     compact_snapshot,
+    direct_draft_source,
     editor_sections,
     sanitize_draft_quotes,
-    sanitize_evidence,
     validate_draft,
-    validate_evidence,
 )
 from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import build_interview_workflow_instructions
@@ -46,7 +44,10 @@ TURNS: list[dict[str, Any]] = [
 
 
 def test_consultant_fidelity_policy_has_a_new_cache_version() -> None:
-    assert PROMPT_VERSION == "consultant_claim_review_v4"
+    assert PROMPT_VERSION == "consultant_direct_draft_v5"
+    instruction = " ".join(DIRECT_DRAFT_INSTRUCTION.split())
+    assert "do not add or replace claims, experiences" in instruction
+    assert "properly structured blog" in instruction
 
 
 @pytest.mark.asyncio
@@ -82,6 +83,54 @@ async def test_consultant_writer_uses_medium_reasoning_for_parse_and_research() 
 
     assert parse.await_args.kwargs["reasoning"] == {"effort": "medium"}
     assert create.await_args.kwargs["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_write_uses_only_direct_draft_instruction_and_transcript_source() -> None:
+    captured: dict[str, Any] = {}
+
+    async def parse_response(**kwargs: Any) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(output_parsed=draft(), usage=None, _request_id="write-request")
+
+    writer = object.__new__(ConsultantWriter)
+    writer.client = SimpleNamespace(responses=SimpleNamespace(parse=parse_response))
+    writer.model = "gpt-5.6-sol"
+    writer.reasoning_effort = "medium"
+    writer.metrics = None
+    writer.usage = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "api_call_counts": {},
+        "api_attempt_counts": {},
+        "stage_seconds": {},
+        "model_calls": [],
+        "rate_limit_wait_seconds": 0,
+    }
+
+    await writer.write(
+        {
+            "article": {
+                "title": "Handoffs",
+                "description": "Private notes",
+                "audience": "Founders",
+                "takeaway": "A separate takeaway",
+                "length": "standard",
+            },
+            "turns": TURNS,
+            "instruction": "initial",
+            "request_kind": "generation",
+            "base_sections": None,
+        }
+    )
+
+    request = captured
+    assert request["instructions"] == DIRECT_DRAFT_INSTRUCTION
+    assert WRITING_POLICY not in request["instructions"]
+    assert json.loads(request["input"]) == {
+        "article": {"title": "Handoffs", "audience": "Founders", "length": "standard"},
+        "turns": TURNS,
+    }
 
 
 def draft(
@@ -196,38 +245,58 @@ async def test_research_uses_provider_citation_urls_only() -> None:
     assert create.call_args.kwargs["tools"] == [{"type": "web_search"}]
 
 
-def test_voice_excerpts_must_be_verbatim_participant_speech() -> None:
-    e = Evidence(
-        argument="Handoffs",
-        claims=[{"statement": "Handoffs matter", "turn_ids": ["a"]}],
-        outline=["The problem"],
-        gaps=[],
-        voice={"excerpts": ["expensive confusion"]},
-    )
-    validate_evidence(e, TURNS)
-    e.voice.excerpts = ["increase revenue by 50%"]
-    with pytest.raises(ValueError):
-        validate_evidence(e, TURNS)
-
-
-def test_invalid_model_evidence_is_removed_before_generation() -> None:
-    evidence = Evidence(
-        argument="Handoffs",
-        claims=[
-            {"statement": "Supported", "turn_ids": ["a", "b"]},
-            {"statement": "Interviewer only", "turn_ids": ["b"]},
-        ],
-        outline=["The problem"],
-        gaps=[],
-        voice={"excerpts": ["expensive confusion", "increase revenue by 50%"]},
+def test_direct_draft_source_contains_only_transcript_and_article_basics() -> None:
+    source = direct_draft_source(
+        {
+            "article": {
+                "title": "Handoffs",
+                "description": "Do not send this",
+                "audience": "Founders",
+                "takeaway": "Do not send this either",
+                "length": "standard",
+            },
+            "turns": TURNS,
+            "instruction": "initial",
+            "request_kind": "generation",
+            "external_research": {"findings": "Do not send initial research"},
+            "base_sections": None,
+        }
     )
 
-    cleaned = sanitize_evidence(evidence, TURNS)
+    assert source == {
+        "article": {"title": "Handoffs", "audience": "Founders", "length": "standard"},
+        "turns": TURNS,
+    }
 
-    assert [claim.statement for claim in cleaned.claims] == ["Supported"]
-    assert cleaned.claims[0].turn_ids == ["a"]
-    assert cleaned.voice.excerpts == ["expensive confusion"]
-    validate_evidence(cleaned, TURNS)
+
+def test_direct_draft_source_includes_current_draft_for_rewrites() -> None:
+    source = direct_draft_source(
+        {
+            "article": {"title": "Handoffs", "audience": "Founders", "length": "short"},
+            "turns": TURNS,
+            "instruction": "closer",
+            "base_sections": [{"title": "Opening", "text": "Existing copy"}],
+        }
+    )
+
+    assert source["instruction"] == "closer"
+    assert source["base_sections"] == [{"title": "Opening", "text": "Existing copy"}]
+
+
+def test_direct_draft_source_keeps_explicit_ask_ai_research() -> None:
+    research = {"findings": "Verified public example", "sources": []}
+    source = direct_draft_source(
+        {
+            "article": {"title": "Handoffs", "audience": "Founders", "length": "standard"},
+            "turns": TURNS,
+            "request_kind": "ask_ai",
+            "instruction": "Rewrite with a sourced example",
+            "base_sections": [{"title": "Opening", "text": "Existing copy"}],
+            "external_research": research,
+        }
+    )
+
+    assert source["external_research"] == research
 
 
 def test_unsupported_quote_styling_is_converted_to_paraphrase() -> None:

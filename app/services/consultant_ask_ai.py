@@ -14,7 +14,6 @@ from app.schemas.consultant import (
     ArticleEditAction,
     ArticleEditPlan,
     DraftFinding,
-    Evidence,
     GeneratedDraft,
     GeneratedSection,
 )
@@ -94,27 +93,17 @@ def relevant_turns(
     sections: list[dict[str, Any]],
     actions: list[ArticleEditAction],
     turns: list[dict[str, Any]],
-    evidence: Evidence,
 ) -> list[dict[str, Any]]:
-    """Bound the source payload; prioritize overlap and known claim citations."""
+    """Bound the source payload by direct overlap with the requested article change."""
     participant = [turn for turn in turns if turn["speaker"] == "participant"]
     text = " ".join(
         [action.instruction for action in actions]
         + [section["title"] + " " + section_text(section)[:1000] for section in sections]
     ).lower()
     words = set(re.findall(r"[a-z]{4,}", text))
-    claim_ids = {
-        turn_id
-        for claim in evidence.claims
-        if set(re.findall(r"[a-z]{4,}", claim.statement.lower())) & words
-        for turn_id in claim.turn_ids
-    }
     ranked = sorted(
         participant,
-        key=lambda turn: (
-            turn["item_id"] in claim_ids,
-            len(words & set(re.findall(r"[a-z]{4,}", turn["text"].lower()))),
-        ),
+        key=lambda turn: len(words & set(re.findall(r"[a-z]{4,}", turn["text"].lower()))),
         reverse=True,
     )
     return ranked[:12]
@@ -160,7 +149,6 @@ def check_editor_sections(sections: list[dict[str, Any]]) -> None:
 async def prepare_ask_ai(
     writer: ConsultantWriter,
     snapshot: dict[str, Any],
-    evidence: Evidence,
     progress: Callable[[str], Awaitable[None]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     """Return proposal sections, private candidate metadata, and updated snapshot."""
@@ -185,7 +173,7 @@ async def prepare_ask_ai(
     relevant_sections = [
         section for section in current if section["id"] in {a.target_section_id for a in actions}
     ]
-    selected_turns = relevant_turns(relevant_sections, actions, snapshot["turns"], evidence)
+    selected_turns = relevant_turns(relevant_sections, actions, snapshot["turns"])
     research_needed = bool(
         re.search(
             r"\b(source|sources|citations?|research|stud(?:y|ies)|statistics?|"
@@ -214,13 +202,14 @@ async def prepare_ask_ai(
         compact = {
             "article": snapshot["article"],
             "instruction": snapshot["instruction"],
+            "request_kind": "ask_ai",
             "base_sections": [
                 {"title": section["title"], "text": section_text(section)} for section in current
             ],
             "turns": snapshot["turns"],
             "external_research": snapshot.get("external_research"),
         }
-        draft = await writer.write(compact, evidence.model_dump())
+        draft = await writer.write(compact)
         draft = sanitize_draft_quotes(draft, snapshot["turns"])
         changed = draft.sections
         current = editor_sections(draft, snapshot.get("external_research", {}).get("sources", []))
@@ -255,8 +244,6 @@ async def prepare_ask_ai(
                 "article": snapshot["article"],
                 "outline": [{"id": s["id"], "heading": s["title"]} for s in current],
                 "targets": edit_targets,
-                "voice": evidence.voice.model_dump(),
-                "argument": evidence.argument,
                 "participant_turns": selected_turns,
                 "external_research": snapshot.get("external_research"),
             }
@@ -425,7 +412,6 @@ async def prepare_ask_ai(
                         }
                         for index in sorted(affected)
                     ],
-                    "voice": evidence.voice.model_dump(),
                     "participant_turns": selected_turns,
                     "external_research": snapshot.get("external_research"),
                 }

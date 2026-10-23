@@ -228,32 +228,6 @@ async def enqueue(
         "base_sections": current.sections if current else None,
         "base_draft_updated_at": current.updated_at.isoformat() if current else None,
     }
-    # A rewrite of the same interview does not need to extract its evidence again.
-    # Match the source and writing policy, so corrections or a new interview force
-    # a fresh extraction.
-    previous_jobs = (
-        await session.scalars(
-            select(ConsultantGeneration)
-            .where(
-                ConsultantGeneration.article_id == article.id,
-                ConsultantGeneration.state == "succeeded",
-                ConsultantGeneration.model_id == settings.consultant_model,
-                ConsultantGeneration.prompt_version == PROMPT_VERSION,
-                ConsultantGeneration.evidence.is_not(None),
-            )
-            .order_by(ConsultantGeneration.created_at.desc())
-        )
-    ).all()
-    reusable_evidence = next(
-        (
-            previous.evidence
-            for previous in previous_jobs
-            if previous.snapshot.get("turns") == turns
-            and previous.snapshot.get("article") == snapshot["article"]
-            and previous.snapshot.get("transcript_revisions") == revisions
-        ),
-        None,
-    )
     job = ConsultantGeneration(
         article_id=article.id,
         interview_id=interview.id,
@@ -261,10 +235,7 @@ async def enqueue(
         snapshot=snapshot,
         model_id=settings.consultant_model,
         prompt_version=PROMPT_VERSION,
-        evidence=reusable_evidence,
-        stage=(
-            "plan" if request_kind == "ask_ai" else "write" if reusable_evidence else "understand"
-        ),
+        stage="plan" if request_kind == "ask_ai" else "write",
     )
     session.add(job)
     article.status = "ready_to_draft"

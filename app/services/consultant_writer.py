@@ -13,7 +13,7 @@ from openai import AsyncOpenAI, RateLimitError
 from pydantic import BaseModel
 
 from app.core.config import Settings
-from app.prompts.consultant import WRITING_POLICY, source_json
+from app.prompts.consultant import DIRECT_DRAFT_INSTRUCTION, WRITING_POLICY, source_json
 from app.schemas.consultant import (
     ArticleEditPlan,
     ArticleFlowCheck,
@@ -21,7 +21,6 @@ from app.schemas.consultant import (
     ArticleTransitionEdits,
     DraftCheck,
     DraftFinding,
-    Evidence,
     FocusedParagraphRepair,
     GeneratedDraft,
     SectionRepairs,
@@ -60,7 +59,7 @@ def _plain_editor_text(value: Any) -> str:
 
 
 def compact_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Build a smaller, deterministic model input without changing stored evidence."""
+    """Build a smaller, deterministic model input from a saved generation snapshot."""
     compact = {
         key: value
         for key, value in snapshot.items()
@@ -94,6 +93,25 @@ def compact_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def direct_draft_source(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Expose only transcript-grounded inputs to the article-writing call."""
+    article = snapshot.get("article", {})
+    source: dict[str, Any] = {
+        "article": {
+            "title": article.get("title", ""),
+            "audience": article.get("audience", ""),
+            "length": article.get("length", "standard"),
+        },
+        "turns": snapshot.get("turns", []),
+    }
+    if snapshot.get("base_sections"):
+        source["instruction"] = snapshot.get("instruction", "updated")
+        source["base_sections"] = snapshot["base_sections"]
+    if snapshot.get("request_kind") == "ask_ai" and snapshot.get("external_research"):
+        source["external_research"] = snapshot["external_research"]
+    return source
+
+
 class ConsultantWriter:
     def __init__(self, settings: Settings, model: str, metrics: MetricsRecorder | None = None):
         if settings.openai_api_key is None:
@@ -123,6 +141,7 @@ class ConsultantWriter:
         source: dict[str, Any],
         max_output_tokens: int = 2200,
         operation_name: str | None = None,
+        instructions_override: str | None = None,
     ) -> T:
         metrics = getattr(self, "metrics", None)
         result = None
@@ -137,7 +156,11 @@ class ConsultantWriter:
             try:
                 result = await self.client.responses.parse(
                     model=self.model,
-                    instructions=WRITING_POLICY + "\n" + task,
+                    instructions=(
+                        instructions_override
+                        if instructions_override is not None
+                        else WRITING_POLICY + "\n" + task
+                    ),
                     input=source_json(source),
                     text_format=schema,
                     max_output_tokens=max_output_tokens,
@@ -444,39 +467,16 @@ class ConsultantWriter:
             operation_name="edit_transition",
         )
 
-    async def understand(self, snapshot: dict[str, Any]) -> Evidence:
-        return await self.parse(
-            Evidence,
-            "Extract a supported argument, claims with participant turn IDs, useful "
-            "outline, gaps, and voice evidence. Voice excerpts must be verbatim "
-            "participant text. Do not invent style evidence.",
-            snapshot,
-            max_output_tokens=2600,
-            operation_name="understand",
-        )
-
-    async def write(self, snapshot: dict[str, Any], evidence: dict[str, Any]) -> GeneratedDraft:
+    async def write(self, snapshot: dict[str, Any]) -> GeneratedDraft:
         length = snapshot.get("article", {}).get("length", "standard")
         output_limit = {"short": 1800, "standard": 2500, "long": 3000}.get(length, 2500)
         return await self.parse(
             GeneratedDraft,
-            "Write the complete blog post. The rewrite instruction applies to the current "
-            "draft in base_sections, but factual evidence remains the participant "
-            "transcript. initial/updated means create a coherent draft; clearer improves "
-            "explanations; concise removes unnecessary words; closer preserves more of "
-            "the interview wording. For free-text instructions, change the current draft "
-            "as requested while preserving the consultant's argument and voice. "
-            "When improving only the opening, keep the existing article's other sections "
-            "and use the participant's actual wording for any example headline or "
-            "list format; do not invent a new example to make the hook catchier. "
-            "When external_research is present, add a public fact or real-world example only "
-            "when its finding supports it, identify it with external_source_ids from the "
-            "provided source list, and do not attribute it to the consultant. If no "
-            "suitable source exists, leave that example out and explain the gap. "
-            "Return a short summary of actual changes in summary.",
-            {**snapshot, "evidence": evidence},
+            "",
+            direct_draft_source(snapshot),
             max_output_tokens=output_limit,
             operation_name="write",
+            instructions_override=DIRECT_DRAFT_INSTRUCTION,
         )
 
     async def check(self, snapshot: dict[str, Any], draft: GeneratedDraft) -> DraftCheck:
@@ -494,11 +494,13 @@ class ConsultantWriter:
             "claim_text and a nullable suggested_replacement supported by the cited evidence. "
             "Give a short, specific "
             "explanation and relevant participant turn IDs or public source IDs where applicable. "
+            "Return at most one finding for each distinct questionable claim and avoid repeating "
+            "the paragraph or source text in the explanation. "
             "Check public facts against external_research findings and cited external_source_ids. "
             "Do not treat a style preference as an accuracy issue. An empty findings list means "
             "the draft passed review.",
             {**snapshot, "candidate": draft.model_dump(mode="json")},
-            max_output_tokens=1600,
+            max_output_tokens=3200,
             operation_name="check_full",
         )
 
@@ -551,7 +553,6 @@ class ConsultantWriter:
             {
                 "article": snapshot.get("article"),
                 "draft_title": draft.title,
-                "argument": snapshot.get("evidence", {}).get("argument", ""),
                 "section_headings": [section.heading for section in draft.sections],
                 "affected_sections": affected,
                 "external_research": snapshot.get("external_research"),
@@ -616,37 +617,6 @@ class ConsultantWriter:
             for neighbor in (index - 1, index + 1)
             if 0 <= neighbor < len(draft.sections)
         ]
-
-
-def validate_evidence(evidence: Evidence, turns: list[dict[str, Any]]) -> None:
-    sources = {t["item_id"]: t["text"] for t in turns if t["speaker"] == "participant"}
-    for claim in evidence.claims:
-        if not claim.turn_ids or not set(claim.turn_ids).issubset(sources):
-            raise ValueError("Evidence references an unknown participant turn")
-    for excerpt in evidence.voice.excerpts:
-        if not any(excerpt in text for text in sources.values()):
-            raise ValueError("Voice excerpt is not present in participant speech")
-
-
-def sanitize_evidence(evidence: Evidence, turns: list[dict[str, Any]]) -> Evidence:
-    """Remove model-selected citations that participant evidence cannot support."""
-    sources = {t["item_id"]: t["text"] for t in turns if t["speaker"] == "participant"}
-    claims = []
-    for claim in evidence.claims:
-        supported_ids = [turn_id for turn_id in claim.turn_ids if turn_id in sources]
-        if supported_ids:
-            claims.append(claim.model_copy(update={"turn_ids": supported_ids}))
-    excerpts = [
-        excerpt
-        for excerpt in evidence.voice.excerpts
-        if any(excerpt in text for text in sources.values())
-    ]
-    return evidence.model_copy(
-        update={
-            "claims": claims,
-            "voice": evidence.voice.model_copy(update={"excerpts": excerpts}),
-        }
-    )
 
 
 def sanitize_draft_quotes(draft: GeneratedDraft, turns: list[dict[str, Any]]) -> GeneratedDraft:

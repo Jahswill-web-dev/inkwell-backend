@@ -174,8 +174,8 @@ def test_metrics_write_failure_cannot_save_draft(
             self.client = SimpleNamespace(close=AsyncMock())
             self.usage: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
 
-        async def understand(self, *_: object) -> None:
-            await self.metrics.start("call", "understand", "test-model")
+        async def write(self, *_: object) -> None:
+            await self.metrics.start("call", "write", "test-model")
 
     async def broken_write(*_: object) -> None:
         raise RuntimeError("metrics storage unavailable")

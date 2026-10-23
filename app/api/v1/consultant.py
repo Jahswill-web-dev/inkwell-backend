@@ -519,13 +519,10 @@ async def retry(job_id: UUID, user: CurrentUser, db: DB) -> dict[str, Any]:
         if running:
             raise svc.fail("generation_running", "Another draft is being generated.")
         job.state, job.error, job.attempts = "queued", None, 0
-        # A fidelity failure has already rejected this candidate. Regenerate it
-        # from the saved evidence instead of checking the same draft again.
+        # Regenerate from the immutable transcript snapshot instead of checking
+        # the same failed candidate again.
         job.candidate = None
-        job.stage = (
-            "plan" if job.snapshot.get("request_kind") == "ask_ai"
-            else "write" if job.evidence else "understand"
-        )
+        job.stage = "plan" if job.snapshot.get("request_kind") == "ask_ai" else "write"
     return svc.job_response(job)
 
 

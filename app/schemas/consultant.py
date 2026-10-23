@@ -22,17 +22,6 @@ class ProfileInput(Input):
     audience: str = Field(default="", max_length=500)
 
 
-class InterviewVoiceEvidence(BaseModel):
-    vocabulary: list[str] = Field(default_factory=list, max_length=30)
-    explanation_patterns: str = Field(default="", max_length=2000)
-    analogies: str = Field(default="", max_length=1000)
-    formality: str = Field(default="", max_length=1000)
-    rhythm: str = Field(default="", max_length=1000)
-    perspective: str = Field(default="", max_length=1000)
-    avoid: list[str] = Field(default_factory=list, max_length=30)
-    excerpts: list[str] = Field(default_factory=list, max_length=20)
-
-
 class ConsultantArticleInput(Input):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=20000)
@@ -73,19 +62,6 @@ class TypedAnswer(Input):
 class NextQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     complete: bool
-
-
-class Claim(BaseModel):
-    statement: str
-    turn_ids: list[str]
-
-
-class Evidence(BaseModel):
-    argument: str
-    claims: list[Claim]
-    outline: list[str]
-    gaps: list[str]
-    voice: InterviewVoiceEvidence
 
 
 class DraftParagraph(BaseModel):
