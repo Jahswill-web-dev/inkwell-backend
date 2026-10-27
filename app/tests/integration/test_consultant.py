@@ -76,7 +76,7 @@ def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClie
     aid, iid = setup_article(client, owner)
     interview = client.get(f"/api/v1/consultant/interviews/{iid}", headers=owner).json()
     assert [item["text"] for item in interview["questions"]] == COVERAGE_GOALS
-    assert interview["voice_phase"] == "awaiting_readiness"
+    assert interview["voice_phase"] is None
     assert client.get(f"/api/v1/consultant/interviews/{iid}", headers=stranger).status_code == 404
     assert client.get(f"/api/v1/articles/{aid}", headers=stranger).status_code == 404
     assert client.get("/api/v1/articles", headers=owner).json()["items"] == []
@@ -97,7 +97,7 @@ def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClie
     again = client.post(path + "/finish", headers=owner)
     assert first.status_code == 200, first.text
     assert again.json()["id"] == first.json()["id"]
-    assert client.get(path, headers=owner).json()["voice_phase"] == "completed"
+    assert client.get(path, headers=owner).json()["voice_phase"] is None
     assert (
         client.post(
             path + "/transcript", headers=owner, json={"turns": [{**turn, "item_id": "late"}]}
@@ -126,7 +126,7 @@ def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClie
     asyncio.run(inspect())
 
 
-def test_voice_completion_requires_backend_phase_session_and_reason(
+def test_legacy_voice_completion_endpoints_remain_compatible(
     consultant_client: TestClient,
 ) -> None:
     client = consultant_client
@@ -161,36 +161,16 @@ def test_voice_completion_requires_backend_phase_session_and_reason(
         "reason": None,
     }
     assert client.post(path, headers=headers, json={"reason": "questions_complete"}).json() == {
-        "approved": False,
-        "reason": None,
-    }
-
-    async def approve_on_server() -> None:
-        engine = create_engine(client.app.state.settings)
-        try:
-            async with create_session_factory(engine).begin() as db:
-                interview = await db.get(ConsultantInterview, UUID(interview_id))
-                assert interview is not None
-                interview.voice_phase = "completed"
-                interview.voice_state = {
-                    "version": 4,
-                    "completion_reason": "questions_complete",
-                }
-        finally:
-            await engine.dispose()
-
-    asyncio.run(approve_on_server())
-    assert client.post(path, headers=headers, json={"reason": "participant_finished"}).json() == {
-        "approved": False,
-        "reason": None,
-    }
-    assert client.post(path, headers=headers, json={"reason": "questions_complete"}).json() == {
         "approved": True,
         "reason": "questions_complete",
+    }
+    assert client.post(path, headers=headers, json={"reason": "participant_finished"}).json() == {
+        "approved": True,
+        "reason": "participant_finished",
     }
     assert client.get(status_path, headers=headers).json() == {
-        "approved": True,
-        "reason": "questions_complete",
+        "approved": False,
+        "reason": None,
     }
 
 

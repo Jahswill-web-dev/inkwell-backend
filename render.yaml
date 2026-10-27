@@ -61,8 +61,6 @@ services:
         value: gpt-5.6-sol
       - key: OPENAI_REASONING_EFFORT
         value: medium
-      - key: CONSULTANT_PHASE_ORCHESTRATOR_ENABLED
-        value: "true"
       - key: LOG_LEVEL
         value: INFO
       - key: VOICE_INTERVIEW_PROVIDER

@@ -13,7 +13,6 @@ from app.schemas.interview_transcript import TranscriptTurn
 from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import (
     END_INTERVIEW_TOOL,
-    ConsultantVoiceControl,
     OpenAIRealtimeService,
     _end_interview_tool_output,
     _run_live_sideband_controller,
@@ -68,6 +67,8 @@ def test_workflow_instructions_use_invitation_and_question_plan() -> None:
     assert "do\n  not treat silence as consent to begin" in instructions
     assert "end_interview with\n  reason participant_finished" in instructions
     assert "end_interview with reason questions_complete" in instructions
+    assert "Is there anything else you'd like to add to the article?" in instructions
+    assert "Do not end the interview\n  before they answer this final question" in instructions
     assert "next natural pause" in instructions
     assert "cost schedule" in instructions
     assert "does not count\n  as the optional follow-up" in instructions
@@ -163,31 +164,23 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
         "Do not ask a substantive question until they clearly confirm readiness"
         in compact_workflow
     )
-    assert "explicitly tentative account" in compact_workflow
     assert "planning context only" in compact_workflow
     assert "not evidence that the consultant personally made any claim" in compact_workflow
     assert "flexible objectives, never as a script" in compact_workflow
-    assert "Explicitly connect questions to details" in compact_workflow
+    assert "Follow useful details with relevant" in compact_workflow
     assert "Skip objectives already answered and drop irrelevant ones" in compact_workflow
     assert "at most two optional follow-ups" in compact_workflow
-    assert (
-        "personal experiences into thinking, perspective, knowledge, or expertise"
-        in compact_workflow
-    )
-    assert "recognising patterns into making predictions" in compact_workflow
-    assert "anything else the consultant would like to say" in compact_workflow
-    assert "added to or used in the blog article" in compact_workflow
-    assert (
-        "do not call end_interview until the consultant clearly confirms the recap"
-        in compact_workflow
-    )
-    assert "explicitly asks to finish immediately" in compact_workflow
+    assert "call end_interview with reason participant_finished" in compact_workflow
+    assert "call end_interview with reason questions_complete" in compact_workflow
+    assert "Is there anything else you'd like to add to the article?" in compact_workflow
+    assert "Do not end before the final answer" in compact_workflow
+    assert "Do not require a fixed recap or extra confirmation" in compact_workflow
     assert '"article_title": "Practical AI for engineers"' in workflow
     assert '"intended_audience": ["Working engineers"]' in workflow
     assert '"coverage_objectives"' in workflow
 
 
-def test_consultant_voice_resume_does_not_repeat_completed_phases() -> None:
+def test_consultant_voice_resume_continues_without_restarting() -> None:
     interview = ConsultantVoiceContext(
         "Jo", "Handoffs", "Why clear ownership matters", ["Founders"], []
     )
@@ -209,7 +202,7 @@ def test_consultant_voice_resume_does_not_repeat_completed_phases() -> None:
     workflow = build_interview_workflow_instructions(interview, turns)
 
     assert "For a resumed interview, briefly acknowledge the interruption" in workflow
-    assert "do not repeat the greeting, readiness check, direction confirmation" in workflow
+    assert "Do not repeat the greeting, readiness check, or answered questions" in workflow
     assert "Participant: Yes, specifically ownership during agency handoffs." in workflow
 
 
@@ -217,6 +210,10 @@ def test_completion_tool_output_rejects_invalid_arguments() -> None:
     assert _end_interview_tool_output('{"reason":"questions_complete"}') == {
         "accepted": True,
         "reason": "questions_complete",
+    }
+    assert _end_interview_tool_output('{"reason":"participant_finished"}') == {
+        "accepted": True,
+        "reason": "participant_finished",
     }
     assert _end_interview_tool_output('{"reason":"anything_else"}') == {
         "accepted": False,
@@ -293,7 +290,6 @@ async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
     service._model = "gpt-live-1"
     service._workflow_model = "gpt-5.6-sol"
     service._reasoning_effort = "medium"
-    service._settings = SimpleNamespace(consultant_phase_orchestrator_enabled=True)
     interview = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", [], [])
 
     with patch("app.services.openai_realtime.start_live_sideband_controller"):
@@ -304,32 +300,5 @@ async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
     assert session["model"] == "gpt-live-1"
     assert session["delegation"]["responses"]["model"] == "gpt-5.6-sol"
     assert session["delegation"]["responses"]["reasoning"] == {"effort": "medium"}
-
-
-async def test_consultant_phase_control_uses_client_delegation() -> None:
-    create = AsyncMock(
-        return_value=SimpleNamespace(
-            session=SimpleNamespace(id="live-session"),
-            transport=SimpleNamespace(sdp="answer-sdp"),
-        )
-    )
-    service = object.__new__(OpenAIRealtimeService)
-    service._client = SimpleNamespace(live=SimpleNamespace(create=create))
-    service._model = "gpt-live-1"
-    service._workflow_model = "gpt-5.6-sol"
-    service._reasoning_effort = "medium"
-    service._settings = SimpleNamespace(consultant_phase_orchestrator_enabled=True)
-    interview = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", [], [])
-    control = ConsultantVoiceControl(uuid4(), SimpleNamespace())  # type: ignore[arg-type]
-
-    with patch("app.services.openai_realtime.start_consultant_sideband_controller") as start:
-        await service.create_call(
-            sdp="offer-sdp", interview=interview, consultant_control=control
-        )
-
-    session = create.await_args.kwargs["session"]
-    assert session["model"] == "gpt-live-1"
-    assert session["delegation"] == {"type": "client"}
-    assert "tools" not in session
-    assert "tool_choice" not in session
-    start.assert_called_once()
+    assert session["delegation"]["responses"]["tools"] == [END_INTERVIEW_TOOL]
+    assert session["delegation"]["responses"]["tool_choice"] == "auto"

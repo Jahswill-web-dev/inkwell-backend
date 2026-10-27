@@ -43,6 +43,47 @@ TYPED_QUESTIONS = [
     "How do you approach this with a client?",
     "What should someone do differently after reading this?",
 ]
+FINAL_CONTRIBUTION_QUESTION = "Is there anything else you'd like to add to the article?"
+
+
+def is_no_final_contribution(value: str) -> bool:
+    normalized = value.strip().lower().rstrip(".! ")
+    return normalized in {
+        "no", "nope", "nothing", "none", "not really", "nothing else",
+        "no thanks", "no, thanks", "no thank you", "no, thank you",
+    }
+
+
+def is_explicit_finish(value: str) -> bool:
+    normalized = value.strip().lower().rstrip(".! ")
+    return normalized in {
+        "i'm done", "i am done", "i'm finished", "i am finished",
+        "finish the interview", "end the interview", "i want to finish",
+        "i'd like to finish", "that's all, please finish",
+    }
+
+
+def is_final_contribution_question(value: str) -> bool:
+    normalized = value.lower()
+    return "anything else" in normalized and "add" in normalized and "article" in normalized
+
+
+def typed_reply(
+    *,
+    final_question_active: bool,
+    answer: str,
+    proposed_question: str | None = None,
+    proposed_complete: bool = False,
+) -> tuple[str, bool]:
+    if final_question_active or is_explicit_finish(answer):
+        return "Thank you for sharing your perspective. Your draft is next.", True
+    if proposed_complete or (
+        proposed_question is not None and is_final_contribution_question(proposed_question)
+    ):
+        return FINAL_CONTRIBUTION_QUESTION, False
+    if proposed_question is None:
+        raise ValueError("A proposed question is required before completion")
+    return proposed_question, False
 
 
 def fail(code: str, message: str, status: int = 409) -> AppError:
@@ -156,6 +197,7 @@ def effective_turns(
     turns: list[dict[str, Any]], corrections: dict[str, Any]
 ) -> list[dict[str, Any]]:
     result = []
+    last_question = ""
     for original in turns:
         correction = corrections.get(original["item_id"], {})
         if correction.get("excluded"):
@@ -163,6 +205,13 @@ def effective_turns(
         turn = {key: value for key, value in original.items() if key != "complete"}
         if correction.get("text") is not None:
             turn["text"] = correction["text"]
+        if turn["speaker"] == "interviewer":
+            last_question = turn["text"]
+        elif (
+            is_final_contribution_question(last_question)
+            and is_no_final_contribution(turn["text"])
+        ):
+            continue
         if turn["text"].strip() and turn["text"] != "[Question skipped]":
             result.append(turn)
     return result

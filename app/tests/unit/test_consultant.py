@@ -18,7 +18,14 @@ from app.schemas.consultant import (
     SectionRepairs,
 )
 from app.schemas.draft import ArticleDraftUpdate
-from app.services.consultant_service import COVERAGE_GOALS, TYPED_QUESTIONS, effective_turns
+from app.services.consultant_service import (
+    COVERAGE_GOALS,
+    FINAL_CONTRIBUTION_QUESTION,
+    TYPED_QUESTIONS,
+    effective_turns,
+    is_explicit_finish,
+    typed_reply,
+)
 from app.services.consultant_writer import (
     ConsultantWriter,
     compact_snapshot,
@@ -171,6 +178,40 @@ def test_corrections_are_separate_and_exclusions_remove_evidence() -> None:
     )
     assert result == [{"item_id": "a", "speaker": "participant", "text": "Corrected explanation"}]
     assert TURNS == original
+
+
+def test_final_contribution_is_source_material_only_when_substantive() -> None:
+    turns = [
+        {"item_id": "q", "speaker": "interviewer", "text": FINAL_CONTRIBUTION_QUESTION},
+        {"item_id": "a", "speaker": "participant", "text": "No, thank you."},
+    ]
+    assert effective_turns(turns, {}) == [turns[0]]
+    turns[1] = {"item_id": "a", "speaker": "participant", "text": "Include the handoff checklist."}
+    assert effective_turns(turns, {}) == turns
+
+
+def test_explicit_finish_is_distinct_from_a_final_no() -> None:
+    assert is_explicit_finish("I'm done.")
+    assert not is_explicit_finish("No, thank you.")
+
+
+def test_typed_reply_waits_for_final_answer_then_thanks_participant() -> None:
+    assert typed_reply(
+        final_question_active=False,
+        answer="The handoff example shows the point.",
+        proposed_question="That is everything.",
+        proposed_complete=True,
+    ) == (FINAL_CONTRIBUTION_QUESTION, False)
+    assert typed_reply(final_question_active=True, answer="No, thank you.") == (
+        "Thank you for sharing your perspective. Your draft is next.", True,
+    )
+    assert typed_reply(final_question_active=True, answer="Include the checklist.")[1]
+    assert typed_reply(final_question_active=False, answer="I'm done.")[1]
+    assert typed_reply(
+        final_question_active=False,
+        answer="A final example is useful.",
+        proposed_question="Anything else you would like to add to the article?",
+    ) == (FINAL_CONTRIBUTION_QUESTION, False)
 
 
 def test_interviewer_cannot_be_a_factual_source() -> None:

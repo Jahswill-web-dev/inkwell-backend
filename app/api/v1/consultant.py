@@ -52,7 +52,7 @@ from app.services.consultant_findings import (
 )
 from app.services.consultant_writer import ConsultantWriter
 from app.services.interview_context import ConsultantVoiceContext
-from app.services.openai_realtime import ConsultantVoiceControl, OpenAIRealtimeService
+from app.services.openai_realtime import OpenAIRealtimeService
 
 router = APIRouter(prefix="/consultant", tags=["consultant"])
 DB = Annotated[AsyncSession, Depends(get_db_session)]
@@ -334,8 +334,6 @@ async def start_interview(article_id: UUID, user: CurrentUser, db: DB) -> dict[s
         record = ConsultantInterview(
             article_id=a.id,
             user_id=user.id,
-            voice_phase="awaiting_readiness",
-            voice_state={"version": 0},
             questions=[
                 {"id": str(index), "text": goal}
                 for index, goal in enumerate(svc.COVERAGE_GOALS)
@@ -434,12 +432,6 @@ async def finish(interview_id: UUID, user: CurrentUser, db: DB, request: Request
     i = await svc.owned_interview(db, user.id, interview_id, lock=True)
     job = await svc.enqueue(db, user, i, request.app.state.settings, f"finish:{i.id}")
     i.state = "completed"
-    voice_state = dict(i.voice_state or {})
-    voice_state["version"] = int(voice_state.get("version", 0)) + 1
-    if i.voice_phase != "completed":
-        voice_state["completion_reason"] = "manual_finish"
-    i.voice_phase = "completed"
-    i.voice_state = voice_state
     await db.execute(
         update(VoiceSession)
         .where(VoiceSession.consultant_interview_id == i.id)
@@ -548,10 +540,6 @@ async def voice_session(
             TranscriptTurn.model_validate(turn)
             for turn in svc.effective_turns(t.turns, i.corrections)
         ],
-        consultant_control=ConsultantVoiceControl(
-            interview_id=i.id,
-            session_factory=request.app.state.session_factory,
-        ),
     )
     record = VoiceSession(
         consultant_interview_id=i.id,
@@ -579,7 +567,6 @@ async def voice_completion_approval(
     payload: VoiceCompletionApproval,
     user: CurrentUser,
     db: DB,
-    request: Request,
 ) -> dict[str, Any]:
     interview = await svc.owned_interview(db, user.id, interview_id, lock=True)
     session = await db.scalar(
@@ -590,26 +577,9 @@ async def voice_completion_approval(
     )
     if session is None:
         raise svc.fail("voice_session_not_found", "Voice session not found.", 404)
-    latest = await db.scalar(
-        select(VoiceSession)
-        .where(
-            VoiceSession.consultant_interview_id == interview.id,
-            VoiceSession.status == "connected",
-        )
-        .order_by(VoiceSession.started_at.desc())
-        .limit(1)
-    )
-    orchestrated = request.app.state.settings.consultant_phase_orchestrator_enabled
-    completion_reason = (interview.voice_state or {}).get("completion_reason")
-    approved = (not orchestrated) or (
-        interview.voice_phase == "completed"
-        and latest is not None
-        and latest.id == session.id
-        and completion_reason == payload.reason
-    )
     return {
-        "approved": approved,
-        "reason": completion_reason if approved else None,
+        "approved": True,
+        "reason": payload.reason,
     }
 
 
@@ -621,7 +591,6 @@ async def voice_completion_status(
     session_id: UUID,
     user: CurrentUser,
     db: DB,
-    request: Request,
 ) -> dict[str, Any]:
     interview = await svc.owned_interview(db, user.id, interview_id)
     session = await db.scalar(
@@ -632,26 +601,9 @@ async def voice_completion_status(
     )
     if session is None:
         raise svc.fail("voice_session_not_found", "Voice session not found.", 404)
-    latest = await db.scalar(
-        select(VoiceSession)
-        .where(
-            VoiceSession.consultant_interview_id == interview.id,
-            VoiceSession.status == "connected",
-        )
-        .order_by(VoiceSession.started_at.desc())
-        .limit(1)
-    )
-    completion_reason = (interview.voice_state or {}).get("completion_reason")
-    approved = (
-        request.app.state.settings.consultant_phase_orchestrator_enabled
-        and interview.voice_phase == "completed"
-        and latest is not None
-        and latest.id == session.id
-        and completion_reason in {"participant_finished", "questions_complete"}
-    )
     return {
-        "approved": approved,
-        "reason": completion_reason if approved else None,
+        "approved": False,
+        "reason": None,
     }
 
 
@@ -668,6 +620,11 @@ async def answer(
     existing_reply = next((turn for turn in t.turns if turn["item_id"] == response_id), None)
     if existing_reply:
         return {"saved": True, "complete": existing_reply.get("complete", False)}
+    final_question_active = bool(
+        t.turns
+        and t.turns[-1].get("speaker") == "interviewer"
+        and svc.is_final_contribution_question(t.turns[-1].get("text", ""))
+    )
     settings = request.app.state.settings
     if settings.openai_api_key is None:
         raise svc.fail("ai_unavailable", "The interviewer is not configured.", 503)
@@ -690,6 +647,22 @@ async def answer(
         ]
     # Persist the answer before the provider call; a failed follow-up must not lose it.
     await db.commit()
+    if final_question_active or svc.is_explicit_finish(payload.text):
+        closing, complete = svc.typed_reply(
+            final_question_active=final_question_active,
+            answer=payload.text,
+        )
+        t = await svc.transcript(db, i)
+        t.turns = [
+            *t.turns,
+            {
+                "item_id": response_id,
+                "speaker": "interviewer",
+                "text": closing,
+                "complete": complete,
+            },
+        ]
+        return {"saved": True, "complete": complete}
     a = await svc.owned_article(db, user.id, i.article_id)
     try:
         async with AsyncOpenAI(
@@ -699,9 +672,11 @@ async def answer(
                 model=settings.openai_interview_question_model,
                 instructions=INTERVIEW_POLICY
                 + (
-                    "\nThis is a typed conversation. Return the next single question and "
-                    "complete=true only when coverage is sufficient or the participant explicitly "
-                    "finishes. Skipped questions are not source facts."
+                    "\nThis is a typed conversation. Return the next single question. "
+                    "After sufficient coverage, ask the final contribution question in the policy "
+                    "and set complete=false. Never set complete=true for normal coverage; the "
+                    "application completes after the final answer. "
+                    "Skipped questions are not source facts."
                 ),
                 input=source_json({"article": a.notes, "title": a.working_title, "turns": t.turns}),
                 text_format=NextQuestion,
@@ -723,17 +698,23 @@ async def answer(
         )
     i = await svc.owned_interview(db, user.id, interview_id, lock=True)
     t = await svc.transcript(db, i)
+    next_question, complete = svc.typed_reply(
+        final_question_active=False,
+        answer=payload.text,
+        proposed_question=result.question,
+        proposed_complete=result.complete,
+    )
     if i.state != "completed" and not any(turn["item_id"] == response_id for turn in t.turns):
         t.turns = [
             *t.turns,
             {
                 "item_id": response_id,
                 "speaker": "interviewer",
-                "text": result.question,
-                "complete": result.complete,
+                "text": next_question,
+                "complete": complete,
             },
         ]
-    return {"saved": True, "complete": result.complete}
+    return {"saved": True, "complete": complete}
 
 
 @router.put("/articles/{article_id}/draft")

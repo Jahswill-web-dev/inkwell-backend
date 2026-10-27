@@ -5,6 +5,8 @@ from app.schemas.interview_transcript import TranscriptTurn
 PROMPT_VERSION = "interview-insights-v2"
 SYSTEM_INSTRUCTION = """You turn a source interview transcript into accurate editorial notes.
 Use only what the participant actually said. Do not invent facts or improve claims.
+Treat a "no" response to the final invitation to add article material as no additional source
+material; do not turn it into an insight, example, or claim.
 Every key insight, example, and claim-to-verify must cite source item IDs from the transcript.
 Keep claims that need independent checking in claims_to_verify.
 Stay close to the participant's wording and preserve scope, audience, certainty, and terminology.
