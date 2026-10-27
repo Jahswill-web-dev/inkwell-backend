@@ -160,14 +160,18 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
     assert "Do not call tools" in compact_delivery
     assert "Follow these phases in order" not in delivery
     assert "greet the consultant by name" in compact_workflow
-    assert (
-        "Do not ask a substantive question until they clearly confirm readiness"
-        in compact_workflow
-    )
+    assert "mention the proposed article title" in compact_workflow
+    assert "summarise what its description says the article will explore" in compact_workflow
+    assert "name the intended audience when one is supplied" in compact_workflow
+    assert "Then ask one easy, substantive question" in compact_workflow
+    assert "Do not add a separate readiness check" in compact_workflow
+    assert "Do not open by asking for the article's main argument" in compact_workflow
+    assert "Do not use the same stock opening question for every article" in compact_workflow
+    assert "Ask for or confirm the central argument only after" in compact_workflow
     assert "planning context only" in compact_workflow
     assert "not evidence that the consultant personally made any claim" in compact_workflow
     assert "flexible objectives, never as a script" in compact_workflow
-    assert "Follow useful details with relevant" in compact_workflow
+    assert "From the first answer, follow the most useful thread" in compact_workflow
     assert "Skip objectives already answered and drop irrelevant ones" in compact_workflow
     assert "at most two optional follow-ups" in compact_workflow
     assert "call end_interview with reason participant_finished" in compact_workflow
@@ -176,6 +180,10 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
     assert "Do not end before the final answer" in compact_workflow
     assert "Do not require a fixed recap or extra confirmation" in compact_workflow
     assert '"article_title": "Practical AI for engineers"' in workflow
+    assert (
+        '"article_description": "How engineers can use AI without replacing judgement"'
+        in workflow
+    )
     assert '"intended_audience": ["Working engineers"]' in workflow
     assert '"coverage_objectives"' in workflow
 
@@ -202,7 +210,10 @@ def test_consultant_voice_resume_continues_without_restarting() -> None:
     workflow = build_interview_workflow_instructions(interview, turns)
 
     assert "For a resumed interview, briefly acknowledge the interruption" in workflow
-    assert "Do not repeat the greeting, readiness check, or answered questions" in workflow
+    assert (
+        "Do not repeat the article introduction, opening question, or answered questions"
+        in workflow
+    )
     assert "Participant: Yes, specifically ownership during agency handoffs." in workflow
 
 

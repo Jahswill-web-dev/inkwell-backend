@@ -370,14 +370,17 @@ def test_consultant_voice_instructions_do_not_use_client_invitation_language() -
     c = ConsultantVoiceContext("Jo", "Handoffs", "Broken handoffs", ["Founders"], [])
     prompt = build_interview_workflow_instructions(c)
     compact_prompt = " ".join(prompt.split())
-    assert "completing it starts draft generation" in compact_prompt
-    assert "Confirm the proposed direction" in compact_prompt
+    assert "summarise what its description says the article will explore" in compact_prompt
+    assert "Present this as the planned direction" in compact_prompt
+    assert "finishing starts a draft" in compact_prompt
+    assert "Then ask one easy, substantive question" in compact_prompt
+    assert "Do not add a separate readiness check" in compact_prompt
+    assert "Do not open by asking for the article's main argument" in compact_prompt
     assert "flexible objectives" in compact_prompt
     assert "at most two optional follow-ups" in compact_prompt
     assert "next natural pause" in compact_prompt
-    assert "cost schedule" in compact_prompt
-    assert "anything else the consultant would like to say" in compact_prompt
-    assert "clearly confirms the recap" in compact_prompt
+    assert "Is there anything else you'd like to add to the article?" in compact_prompt
+    assert "Do not end before the final answer" in compact_prompt
     assert "the client's team" not in compact_prompt
     assert "current interview as the only source" in WRITING_POLICY
     assert '"recognises patterns"' in WRITING_POLICY
