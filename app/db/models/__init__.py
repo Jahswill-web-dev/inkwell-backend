@@ -22,6 +22,7 @@ from app.db.models.consultant import (
 from app.db.models.interview_invitation import InterviewInvitation
 from app.db.models.interview_transcript import InterviewTranscript
 from app.db.models.login_rate_limit import LoginRateLimit
+from app.db.models.refresh_session import RefreshSession
 from app.db.models.section_interview import SectionInterview
 from app.db.models.user import User
 from app.db.models.voice_session import VoiceSession
@@ -47,6 +48,7 @@ __all__ = [
     "InterviewInvitation",
     "InterviewTranscript",
     "LoginRateLimit",
+    "RefreshSession",
     "SectionInterview",
     "User",
     "VoiceSession",

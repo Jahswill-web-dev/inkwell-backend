@@ -51,5 +51,17 @@ class LoginRequest(BaseModel):
 
 class AuthResponse(BaseModel):
     access_token: str
+    refresh_token: str
+    refresh_expires_at: datetime
     token_type: str = "bearer"
     user: PublicUser
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=50, max_length=200)
+
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    refresh_expires_at: datetime

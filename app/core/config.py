@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(min_length=32)
     jwt_algorithm: Literal["HS256"] = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=30, gt=0)
+    refresh_session_days: int = Field(default=30, gt=0)
     jwt_issuer: str = "inkwell-api"
     jwt_audience: str = "inkwell-client"
 

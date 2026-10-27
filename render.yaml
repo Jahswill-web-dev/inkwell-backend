@@ -31,6 +31,8 @@ services:
         value: HS256
       - key: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
         value: "30"
+      - key: REFRESH_SESSION_DAYS
+        value: "30"
       - key: JWT_ISSUER
         value: inkwell-api
       - key: JWT_AUDIENCE

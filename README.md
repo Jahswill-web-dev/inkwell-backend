@@ -349,7 +349,9 @@ For requests with a JSON body, send this header:
 Content-Type: application/json
 ```
 
-The registration and login endpoints return a JWT access token. Send that token to protected
+The registration and login endpoints return a 30-minute JWT access token and a rotating refresh
+credential with a 30-day absolute expiry. Keep the refresh credential in a secure, HTTP-only
+browser cookie; exchange it through `/api/v1/auth/refresh` when the access token expires. Send the access token to protected
 endpoints such as `/api/v1/auth/me` in the bearer format:
 
 ```http
@@ -367,6 +369,8 @@ allows `http://localhost:3000`.
 | `GET` | `/ready` | None | `200 OK` | Check whether the API can connect to PostgreSQL |
 | `POST` | `/api/v1/auth/register` | None | `201 Created` | Create an account and receive an access token |
 | `POST` | `/api/v1/auth/login` | None | `200 OK` | Authenticate by email and receive an access token |
+| `POST` | `/api/v1/auth/refresh` | Refresh credential | `200 OK` | Rotate the refresh credential and issue a new access token |
+| `POST` | `/api/v1/auth/logout` | Refresh credential | `204 No Content` | Revoke the long-lived session |
 | `GET` | `/api/v1/auth/me` | Bearer token | `200 OK` | Return the authenticated user |
 | `GET` | `/api/v1/workspaces/current` | Bearer token | `200 OK` | Return the user's default workspace and role |
 | `GET` | `/api/v1/clients` | Bearer token | `200 OK` | List clients in the default workspace |
@@ -501,6 +505,8 @@ Successful response - `201 Created`:
 ```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "<rotating-refresh-credential>",
+  "refresh_expires_at": "2026-09-10T12:00:00Z",
   "token_type": "bearer",
   "user": {
     "id": "46a42280-6ad8-4bb6-a29c-1604adbf0c31",

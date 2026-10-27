@@ -53,6 +53,8 @@ def test_registration_response_exposes_only_public_user_fields() -> None:
 
     response = AuthResponse(
         access_token="token",
+        refresh_token="r" * 64,
+        refresh_expires_at=now,
         user=PublicUser.model_validate(user),
     ).model_dump(mode="json")
 

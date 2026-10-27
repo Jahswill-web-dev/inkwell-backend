@@ -19,6 +19,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.models.login_rate_limit import LoginRateLimit
+from app.db.models.refresh_session import RefreshSession
 from app.db.models.user import User
 from app.db.models.workspace import Workspace
 from app.db.repositories.user import UserRepository
@@ -154,6 +155,70 @@ def test_registration_creates_normalized_user_and_access_token(
     assert persisted is not None
     assert persisted.password_hash != plaintext_password
     assert verify_password(plaintext_password, persisted.password_hash)
+
+
+def test_refresh_rotates_credentials_and_logout_revokes_session(
+    auth_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = auth_context
+    registered = client.post("/api/v1/auth/register", json=registration_payload())
+    assert registered.status_code == 201
+    initial = registered.json()
+    assert initial["refresh_token"]
+    assert decode_access_token(initial["access_token"], settings)["sub"] == initial["user"]["id"]
+
+    first = client.post("/api/v1/auth/refresh", json={"refresh_token": initial["refresh_token"]})
+    assert first.status_code == 200
+    rotated = first.json()
+    assert rotated["refresh_token"] != initial["refresh_token"]
+    assert rotated["refresh_expires_at"] == initial["refresh_expires_at"]
+
+    # Concurrent requests carrying the old cookie receive the same rotated credential.
+    duplicate = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": initial["refresh_token"]}
+    )
+    assert duplicate.status_code == 200
+    assert duplicate.json()["refresh_token"] == rotated["refresh_token"]
+
+    assert (
+        client.post(
+            "/api/v1/auth/logout", json={"refresh_token": rotated["refresh_token"]}
+        ).status_code
+        == 204
+    )
+    assert (
+        client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": rotated["refresh_token"]}
+        ).status_code
+        == 401
+    )
+
+
+def test_refresh_cannot_extend_past_the_absolute_session_deadline(
+    auth_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = auth_context
+    registered = client.post("/api/v1/auth/register", json=registration_payload()).json()
+
+    async def expire_session() -> None:
+        engine = create_engine(settings)
+        try:
+            async with create_session_factory(engine).begin() as session:
+                await session.execute(
+                    update(RefreshSession).values(
+                        expires_at=datetime.now(UTC) - timedelta(seconds=1)
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(expire_session())
+    assert (
+        client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": registered["refresh_token"]}
+        ).status_code
+        == 401
+    )
 
 
 @pytest.mark.parametrize(

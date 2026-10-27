@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
@@ -9,7 +10,6 @@ from app.core.config import Settings
 from app.core.exceptions import AppError
 from app.core.security import (
     DUMMY_PASSWORD_HASH,
-    create_access_token,
     hash_password,
     verify_and_update_password,
 )
@@ -17,12 +17,15 @@ from app.db.models.user import User
 from app.db.models.workspace import Workspace, WorkspaceMember
 from app.db.repositories.user import UserRepository
 from app.services.login_rate_limiter import LoginRateLimiter
+from app.services.refresh_session_service import issue_refresh_session
 
 
 @dataclass(frozen=True, slots=True)
 class AuthResult:
     user: User
     access_token: str
+    refresh_token: str
+    refresh_expires_at: datetime
 
 
 class AuthService:
@@ -84,7 +87,7 @@ class AuthService:
                 raise _username_conflict() from exc
             raise
 
-        return self._create_auth_result(user)
+        return await self._create_auth_result(user)
 
     async def login(self, *, email: str, password: str, client_ip: str) -> AuthResult:
         await self.login_rate_limiter.ensure_allowed(email=email, client_ip=client_ip)
@@ -110,11 +113,16 @@ class AuthService:
             await self.users.session.flush()
             await self.users.session.refresh(user)
 
-        return self._create_auth_result(user)
+        return await self._create_auth_result(user)
 
-    def _create_auth_result(self, user: User) -> AuthResult:
-        token = create_access_token(str(user.id), self.settings)
-        return AuthResult(user=user, access_token=token)
+    async def _create_auth_result(self, user: User) -> AuthResult:
+        credentials = await issue_refresh_session(self.users.session, user, self.settings)
+        return AuthResult(
+            user=user,
+            access_token=credentials.access_token,
+            refresh_token=credentials.refresh_token,
+            refresh_expires_at=credentials.refresh_expires_at,
+        )
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

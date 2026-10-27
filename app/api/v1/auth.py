@@ -6,10 +6,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.dependencies.auth import CurrentUser
 from app.db.repositories.user import UserRepository
 from app.db.session import get_db_session
-from app.schemas.auth import AuthResponse, LoginRequest, PublicUser, RegisterRequest
+from app.schemas.auth import (
+    AuthResponse,
+    LoginRequest,
+    PublicUser,
+    RefreshRequest,
+    RefreshResponse,
+    RegisterRequest,
+)
 from app.schemas.common import ErrorResponse
 from app.services.auth_service import AuthService
 from app.services.login_rate_limiter import LoginRateLimiter
+from app.services.refresh_session_service import revoke_refresh_session, rotate_refresh_session
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -34,6 +42,8 @@ async def register(
     )
     return AuthResponse(
         access_token=result.access_token,
+        refresh_token=result.refresh_token,
+        refresh_expires_at=result.refresh_expires_at,
         user=PublicUser.model_validate(result.user),
     )
 
@@ -60,8 +70,35 @@ async def login(
     )
     return AuthResponse(
         access_token=result.access_token,
+        refresh_token=result.refresh_token,
+        refresh_expires_at=result.refresh_expires_at,
         user=PublicUser.model_validate(result.user),
     )
+
+
+@router.post("/refresh", response_model=RefreshResponse)
+async def refresh(
+    payload: RefreshRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> RefreshResponse:
+    credentials = await rotate_refresh_session(
+        session, payload.refresh_token, request.app.state.settings
+    )
+    return RefreshResponse(
+        access_token=credentials.access_token,
+        refresh_token=credentials.refresh_token,
+        refresh_expires_at=credentials.refresh_expires_at,
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    payload: RefreshRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> None:
+    await revoke_refresh_session(session, payload.refresh_token, request.app.state.settings)
 
 
 def _auth_service(request: Request, session: AsyncSession) -> AuthService:
