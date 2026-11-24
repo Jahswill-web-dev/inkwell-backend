@@ -1742,7 +1742,9 @@ and allow up to 500 characters each.
 | PUT | `/articles/{article_id}/details` | Update title and description; blocked during active generation |
 | POST | `/articles/{article_id}/interviews` | Create or resume unfinished interview; returns its `id` |
 | GET | `/interviews/{interview_id}` | Setup, questions, state, original turns, and separate corrections |
+| GET | `/interviews/{interview_id}/current-question` | Last delivered question and next pending question, without downloading the transcript |
 | POST | `/interviews/{interview_id}/voice/session` | Exchange SDP offer for authenticated OpenAI WebRTC session |
+| POST | `/interviews/{interview_id}/voice/sessions/{session_id}/questions/{question_id}/delivery` | Acknowledge completed or interrupted question playback |
 | POST | `/interviews/{interview_id}/transcript` | Append deduplicated transcript turns |
 | POST | `/interviews/{interview_id}/answer` | Save typed answer and generate next question; returns `saved` and `complete` |
 | PUT | `/interviews/{interview_id}/corrections` | Merge corrections/exclusions keyed by existing turn IDs |
@@ -1755,6 +1757,64 @@ and allow up to 500 characters each.
 
 There is no separate consultant job-status endpoint: poll article detail and read `job`.
 A job response includes `id`, `state`, `stage`, `error`, `attempts`, and `created_at`.
+
+#### Live current-question state
+
+Consultant voice sessions register adaptive questions using the private `present_question` workflow
+tool. The workflow supplies `question`, `kind` (`question`, `follow_up`, `clarification`, `final`),
+and the full `spoken_text` containing that question verbatim. The voice model is instructed to
+preserve the question's wording. These are the actual adaptive questions, not entries inferred
+from the coverage-objective list. Guest/marketing interview tool configuration is unchanged.
+
+Both interview detail and `GET /interviews/{interview_id}/current-question` return:
+
+```json
+{
+  "current_question": null,
+  "pending_question": {
+    "id": "<question UUID>",
+    "voice_session_id": "<voice-session UUID>",
+    "sequence": 1,
+    "text": "What happened at the handoff?",
+    "kind": "question",
+    "status": "pending",
+    "created_at": "2026-11-24T12:00:00Z",
+    "delivered_at": null,
+    "transcript_item_ids": []
+  }
+}
+```
+
+`current_question` is the latest confirmed question and remains visible while a new one is
+pending. Old interviews return null until structured questions are registered and acknowledged;
+the API does not guess a question from historical dialogue. Question state uses the existing
+`voice_state` and voice-session `provider_metadata` JSON fields; no migration is required.
+
+Frontend integration contract (the UI/voice hook is intentionally not wired in this backend change):
+
+1. Read pending question metadata from the lightweight GET endpoint. The workflow tool output
+   also carries its question ID and voice-session ID; any event used as a notification should
+   trigger an authoritative GET after the server has registered it.
+2. Accumulate spoken transcript fragments. Save interviewer turns through the existing transcript
+   endpoint, including their `voice_session_id`, and wait for successful persistence.
+3. After the voice client confirms that the question audio was actually played, POST to the
+   question's `/delivery` endpoint with
+   `{"status":"delivered","transcript_item_ids":["<saved interviewer item ID>"]}`.
+   Multiple IDs are supported for a question split across contiguous, ordered interviewer
+   fragments in the same voice session. Registration, generated text, a tool acknowledgment,
+   transcript arrival, or a silence timeout alone do not prove completed browser playback.
+4. For interrupted/undelivered audio, send `{"status":"interrupted"}` instead; do not promote
+   the pending question. If playback cannot be established, leave it unconfirmed.
+5. Use the returned `current_question` for the display. Re-fetch on refresh/resume. Pause, finish,
+   or a replacement voice session clears pending state and preserves the last confirmed question.
+
+Delivery returns the same state shape. Repeated acknowledgments with identical evidence are
+idempotent. Superseded questions, inactive sessions and conflicting acknowledgments return `409`;
+missing/wrong interviewer words, reused evidence or another session's transcript return `422`.
+Other owners' interviews and unrelated session/question IDs return `404`. Playback acknowledgment
+is an authenticated client report, checked against saved words; the server cannot independently
+prove that audio reached the listener. No additional extraction-model call or drafting worker is
+needed. A real provider/audio smoke test is still required when wiring the frontend.
 
 Create an article before requesting microphone access:
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -12,6 +14,7 @@ from sqlalchemy import select
 
 from alembic import command
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.db.models.article_draft import ArticleDraft
 from app.db.models.consultant import (
     ConsultantDraftRevision,
@@ -21,7 +24,8 @@ from app.db.models.consultant import (
 from app.db.models.voice_session import VoiceSession
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
-from app.schemas.consultant import GeneratedDraft
+from app.schemas.consultant import GeneratedDraft, VoiceQuestionInput
+from app.services.consultant_questions import register_session_question
 from app.services.consultant_service import COVERAGE_GOALS
 from app.services.consultant_writer import editor_sections
 from app.tests.integration.test_database import alembic_config, require_test_url
@@ -69,6 +73,130 @@ def setup_article(client: TestClient, headers: dict[str, str]) -> tuple[str, str
     return aid, i.json()["id"]
 
 
+def test_live_questions_persist_delivery_and_survive_pause_and_reconnect(
+    consultant_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = consultant_client
+    owner = register(client, "question_owner")
+    stranger = register(client, "question_stranger")
+    _, iid = setup_article(client, owner)
+    _, other_iid = setup_article(client, owner)
+    base = f"/api/v1/consultant/interviews/{iid}"
+    provider = AsyncMock(
+        side_effect=[
+            SimpleNamespace(sdp="answer", external_session_id="question-live-1"),
+            SimpleNamespace(sdp="answer", external_session_id="question-live-2"),
+            SimpleNamespace(sdp="answer", external_session_id="question-live-other"),
+        ]
+    )
+    monkeypatch.setattr(
+        "app.api.v1.consultant.OpenAIRealtimeService",
+        lambda _: SimpleNamespace(create_call=provider),
+    )
+    assert client.get(base + "/current-question", headers=owner).json() == {
+        "current_question": None,
+        "pending_question": None,
+    }
+    assert client.get(base + "/current-question", headers=stranger).status_code == 404
+    start = client.post(base + "/voice/session", headers=owner, json={"sdp": "offer"})
+    assert start.status_code == 200, start.text
+    sid = start.json()["session_id"]
+    assert callable(provider.await_args.kwargs["on_question"])
+
+    async def select_question(session_id: str, call_id: str, text: str) -> dict[str, Any]:
+        engine = create_engine(client.app.state.settings)
+        try:
+            selected = await register_session_question(
+                create_session_factory(engine),
+                UUID(iid),
+                UUID(session_id),
+                call_id,
+                VoiceQuestionInput(question=text, spoken_text=f"Thanks. {text}", kind="follow_up"),
+            )
+            return selected.model_dump(mode="json")
+        finally:
+            await engine.dispose()
+
+    def select_question_sync(call_id: str, text: str, session_id: str = sid) -> dict[str, Any]:
+        return asyncio.run(select_question(session_id, call_id, text))
+
+    def acknowledge(question: dict[str, Any], status: str, item_id: str | None = None) -> Any:
+        return client.post(
+            base
+            + f"/voice/sessions/{question['voice_session_id']}/questions/{question['id']}/delivery",
+            headers=owner,
+            json={"status": status, "transcript_item_ids": [item_id] if item_id else []},
+        )
+
+    first = select_question_sync("call-first", "What happened at the handoff?")
+    assert select_question_sync("call-first", first["text"])["id"] == first["id"]
+    assert client.get(base, headers=owner).json()["pending_question"] == first
+    # Generation or a saved transcript alone does not mean the question was played.
+    assert acknowledge(first, "delivered", "spoken-first").status_code == 422
+    turns = [
+        {
+            "item_id": "spoken-first",
+            "speaker": "interviewer",
+            "voice_session_id": sid,
+            "text": "Thanks. What happened at the handoff?",
+        },
+        {
+            "item_id": "answer-first",
+            "speaker": "participant",
+            "voice_session_id": sid,
+            "text": "The receiving team did not know who owned the decision. The handoff stalled.",
+        },
+    ]
+    assert (
+        client.post(base + "/transcript", headers=owner, json={"turns": turns}).status_code == 200
+    )
+    assert client.get(base + "/current-question", headers=owner).json()["current_question"] is None
+    delivered = acknowledge(first, "delivered", "spoken-first")
+    assert delivered.status_code == 200, delivered.text
+    current = delivered.json()["current_question"]
+    assert current["text"] == first["text"] and current["status"] == "delivered"
+    assert acknowledge(first, "delivered", "spoken-first").json()["current_question"] == current
+    assert client.get(base, headers=owner).json()["current_question"] == current
+
+    follow_up = select_question_sync("call-followup", "What did you change?")
+    assert (
+        client.get(base + "/current-question", headers=owner).json()["current_question"] == current
+    )
+    assert acknowledge(follow_up, "interrupted").json()["current_question"] == current
+    # A newer decision supersedes an unplayed question, and a late ACK cannot revive it.
+    old_pending = select_question_sync("call-old", "Who was involved?")
+    pending = select_question_sync("call-new", "What was the result?")
+    assert acknowledge(old_pending, "interrupted").status_code == 409
+    assert client.post(base + "/pause", headers=owner).status_code == 200
+    state = client.get(base + "/current-question", headers=owner).json()
+    assert state == {"current_question": current, "pending_question": None}
+    assert acknowledge(pending, "delivered", "spoken-first").status_code == 409
+
+    resumed = client.post(base + "/voice/session", headers=owner, json={"sdp": "offer"})
+    new_sid = resumed.json()["session_id"]
+    assert new_sid != sid
+    assert client.get(base, headers=owner).json()["current_question"] == current
+    replacement = select_question_sync("call-resumed", "Which result mattered most?", new_sid)
+    assert replacement["sequence"] > pending["sequence"]
+    with pytest.raises(AppError, match="no longer active"):
+        select_question_sync("late-old-session", "What happened next?")
+    # Cross-owner and cross-interview delivery attempts cannot change state.
+    path = base + f"/voice/sessions/{new_sid}/questions/{replacement['id']}/delivery"
+    assert client.post(path, headers=stranger, json={"status": "interrupted"}).status_code == 404
+    other_voice = client.post(
+        f"/api/v1/consultant/interviews/{other_iid}/voice/session",
+        headers=owner,
+        json={"sdp": "offer"},
+    ).json()["session_id"]
+    wrong_path = base + f"/voice/sessions/{other_voice}/questions/{replacement['id']}/delivery"
+    assert client.post(wrong_path, headers=owner, json={"status": "interrupted"}).status_code == 404
+    assert client.post(base + "/finish", headers=owner).status_code == 200
+    state = client.get(base + "/current-question", headers=owner).json()
+    assert state == {"current_question": current, "pending_question": None}
+    assert acknowledge(replacement, "interrupted").status_code == 409
+
+
 @pytest.mark.parametrize("length", ["extended", "in_depth"])
 def test_longer_article_length_is_persisted_and_queued(
     consultant_client: TestClient, length: str
@@ -82,14 +210,20 @@ def test_longer_article_length_is_persisted_and_queued(
     )
     assert response.status_code == 201, response.text
     article_id = response.json()["id"]
-    interview = client.post(
-        f"/api/v1/consultant/articles/{article_id}/interviews", headers=headers
-    )
+    interview = client.post(f"/api/v1/consultant/articles/{article_id}/interviews", headers=headers)
     path = f"/api/v1/consultant/interviews/{interview.json()['id']}"
     saved = client.post(
-        path + "/transcript", headers=headers,
-        json={"turns": [{"item_id": "evidence", "speaker": "participant",
-                         "text": "Assign a clear owner to every handoff."}]},
+        path + "/transcript",
+        headers=headers,
+        json={
+            "turns": [
+                {
+                    "item_id": "evidence",
+                    "speaker": "participant",
+                    "text": "Assign a clear owner to every handoff.",
+                }
+            ]
+        },
     )
     assert saved.status_code == 200, saved.text
     queued = client.post(path + "/finish", headers=headers)

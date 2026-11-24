@@ -13,8 +13,10 @@ from app.schemas.interview_transcript import TranscriptTurn
 from app.services.interview_context import ConsultantVoiceContext
 from app.services.openai_realtime import (
     END_INTERVIEW_TOOL,
+    PRESENT_QUESTION_TOOL,
     OpenAIRealtimeService,
     _end_interview_tool_output,
+    _question_tool_output,
     _run_live_sideband_controller,
     build_interview_workflow_instructions,
     build_live_voice_instructions,
@@ -86,11 +88,23 @@ def test_workflow_instructions_resume_from_persisted_transcript() -> None:
     now = datetime.now(UTC)
     interview = GuestInterviewResponse(
         invitation=InterviewInvitationResponse(
-            id=uuid4(), article_id=uuid4(), article_title="Research", client_name="Northstar",
-            writer_name="Morgan", participant_name="Avery", participant_email="avery@example.com",
-            token="x" * 48, status="active", expires_at=None, progress_state="opened",
-            questions_answered=0, estimated_questions=1, opened_at=now, completed_at=None,
-            created_at=now, updated_at=now,
+            id=uuid4(),
+            article_id=uuid4(),
+            article_title="Research",
+            client_name="Northstar",
+            writer_name="Morgan",
+            participant_name="Avery",
+            participant_email="avery@example.com",
+            token="x" * 48,
+            status="active",
+            expires_at=None,
+            progress_state="opened",
+            questions_answered=0,
+            estimated_questions=1,
+            opened_at=now,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
         ),
         session=GuestSessionData(
             token="x" * 48,
@@ -120,11 +134,23 @@ def test_live_voice_instructions_are_concise_and_delegate_workflow() -> None:
     now = datetime.now(UTC)
     interview = GuestInterviewResponse(
         invitation=InterviewInvitationResponse(
-            id=uuid4(), article_id=uuid4(), article_title="Research", client_name="Northstar",
-            writer_name="Morgan", participant_name="Avery", participant_email="avery@example.com",
-            token="x" * 48, status="active", expires_at=None, progress_state="opened",
-            questions_answered=0, estimated_questions=1, opened_at=now, completed_at=None,
-            created_at=now, updated_at=now,
+            id=uuid4(),
+            article_id=uuid4(),
+            article_title="Research",
+            client_name="Northstar",
+            writer_name="Morgan",
+            participant_name="Avery",
+            participant_email="avery@example.com",
+            token="x" * 48,
+            status="active",
+            expires_at=None,
+            progress_state="opened",
+            questions_answered=0,
+            estimated_questions=1,
+            opened_at=now,
+            completed_at=None,
+            created_at=now,
+            updated_at=now,
         ),
         session=GuestSessionData(token="x" * 48, questions=[]),
     )
@@ -181,8 +207,7 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
     assert "Do not require a fixed recap or extra confirmation" in compact_workflow
     assert '"article_title": "Practical AI for engineers"' in workflow
     assert (
-        '"article_description": "How engineers can use AI without replacing judgement"'
-        in workflow
+        '"article_description": "How engineers can use AI without replacing judgement"' in workflow
     )
     assert '"intended_audience": ["Working engineers"]' in workflow
     assert '"coverage_objectives"' in workflow
@@ -313,3 +338,99 @@ async def test_live_delegation_uses_sol_with_medium_reasoning() -> None:
     assert session["delegation"]["responses"]["reasoning"] == {"effort": "medium"}
     assert session["delegation"]["responses"]["tools"] == [END_INTERVIEW_TOOL]
     assert session["delegation"]["responses"]["tool_choice"] == "auto"
+
+
+async def test_question_tool_validates_before_persistence_and_handles_storage_failure() -> None:
+    handler = AsyncMock()
+    assert await _question_tool_output("q", "{}", handler) == {
+        "accepted": False,
+        "error": "invalid_question",
+    }
+    handler.assert_not_called()
+    args = '{"question":"What changed?","spoken_text":"What changed?","kind":"question"}'
+    assert await _question_tool_output("q", args, None) == {
+        "accepted": False,
+        "error": "question_tracking_unavailable",
+    }
+    handler.side_effect = RuntimeError("private transcript-bearing SQL error")
+    assert await _question_tool_output("q", args, handler) == {
+        "accepted": False,
+        "error": "question_storage_unavailable",
+    }
+
+
+async def test_sideband_registers_question_once_and_returns_approved_speech() -> None:
+    import json
+
+    from app.schemas.consultant import VoiceQuestion
+
+    question = VoiceQuestion(
+        id=uuid4(),
+        voice_session_id=uuid4(),
+        sequence=1,
+        text="What changed?",
+        kind="follow_up",
+        status="pending",
+        created_at=datetime.now(UTC),
+    )
+    handler = AsyncMock(return_value=question)
+    connection = _FakeSidebandConnection()
+    call = {
+        "type": "function_call",
+        "call_id": "question-1",
+        "name": "present_question",
+        "arguments": json.dumps(
+            {
+                "question": question.text,
+                "spoken_text": "Thanks. What changed?",
+                "kind": "follow_up",
+            }
+        ),
+    }
+    connection.events = [
+        SimpleNamespace(
+            type="response.event", event={"type": "response.output_item.done", "item": call}
+        ),
+        SimpleNamespace(
+            type="response.event", event={"type": "response.output_item.done", "item": call}
+        ),
+        SimpleNamespace(type="session.closed"),
+    ]
+    client = SimpleNamespace(
+        live=SimpleNamespace(sideband=SimpleNamespace(connect=lambda **_: connection))
+    )
+    await _run_live_sideband_controller(client, "live-test", handler)
+    handler.assert_awaited_once()
+    assert handler.await_args.args[0] == "question-1"
+    assert len(connection.sent) == 2
+    output = json.loads(connection.sent[0]["item"]["output"])
+    assert output["question"]["id"] == str(question.id)
+    assert output["question"]["status"] == "pending"
+    assert output["spoken_text"] == "Thanks. What changed?"
+
+
+async def test_question_tracking_is_enabled_only_when_a_recorder_is_supplied() -> None:
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            session=SimpleNamespace(id="live-session"),
+            transport=SimpleNamespace(sdp="answer"),
+        )
+    )
+    service = object.__new__(OpenAIRealtimeService)
+    service._client = SimpleNamespace(live=SimpleNamespace(create=create))
+    service._model, service._workflow_model, service._reasoning_effort = (
+        "live",
+        "workflow",
+        "medium",
+    )
+    handler = AsyncMock()
+    with patch("app.services.openai_realtime.start_live_sideband_controller") as sideband:
+        await service.create_call(
+            sdp="offer",
+            interview=ConsultantVoiceContext("Jo", "Handoffs", "", [], []),
+            on_question=handler,
+        )
+    workflow = create.await_args.kwargs["session"]["delegation"]["responses"]
+    assert workflow["tools"] == [END_INTERVIEW_TOOL, PRESENT_QUESTION_TOOL]
+    assert "Before every question" in workflow["instructions"]
+    sideband.assert_called_once_with(service._client, "live-session", handler)

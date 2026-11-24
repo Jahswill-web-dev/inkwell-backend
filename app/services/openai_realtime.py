@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -11,11 +12,37 @@ from openai.types.live.media_session_config_param import MediaSessionConfigParam
 
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.schemas.consultant import VoiceQuestion, VoiceQuestionInput
 from app.schemas.interview_invitation import GuestInterviewResponse
 from app.schemas.interview_transcript import TranscriptTurn
 from app.services.interview_context import ConsultantVoiceContext
 
 logger = logging.getLogger(__name__)
+
+QuestionHandler = Callable[[str, VoiceQuestionInput], Awaitable[VoiceQuestion]]
+
+PRESENT_QUESTION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "name": "present_question",
+    "description": (
+        "Register the exact next question and its complete spoken response before speaking it. "
+        "Use for opening questions, follow-ups, clarifications and the final question. "
+        "This prepares display metadata; it does not mean audio has been delivered."
+    ),
+    "parameters": VoiceQuestionInput.model_json_schema(),
+}
+
+QUESTION_WORKFLOW_INSTRUCTIONS = """
+Before every question you intend to ask, call present_question with the exact question, its kind,
+and spoken_text containing your full next spoken response. The question must appear verbatim in
+spoken_text; keep any introduction or acknowledgment outside the question field. Use question for
+an opening or new topic, follow_up for a follow-up, clarification for an ambiguity clarification,
+and final for the final contribution question. Never register an acknowledgment or closing as a
+question. After the tool accepts, deliver its spoken_text with the question unchanged. Do not call
+present_question again for that same response. If rejected, correct the tool call before speaking
+the question; do not claim it was delivered or saved. Acknowledgments and closings without a new
+question do not need this tool. Do not mention tools, IDs or display metadata to the consultant.
+"""
 
 
 @dataclass(frozen=True)
@@ -216,16 +243,20 @@ class OpenAIRealtimeService:
         sdp: str,
         interview: GuestInterviewResponse | ConsultantVoiceContext,
         previous_turns: list[TranscriptTurn] | None = None,
+        on_question: QuestionHandler | None = None,
     ) -> OpenAICallResult:
+        workflow = build_interview_workflow_instructions(interview, previous_turns)
+        tools = [END_INTERVIEW_TOOL]
+        if on_question is not None:
+            workflow += QUESTION_WORKFLOW_INSTRUCTIONS
+            tools = [*tools, PRESENT_QUESTION_TOOL]
         delegation: dict[str, Any] = {
             "type": "responses",
             "responses": {
                 "model": self._workflow_model,
                 "reasoning": {"effort": self._reasoning_effort},
-                "instructions": build_interview_workflow_instructions(
-                    interview, previous_turns
-                ),
-                "tools": [END_INTERVIEW_TOOL],
+                "instructions": workflow,
+                "tools": tools,
                 "tool_choice": "auto",
                 "parallel_tool_calls": False,
             },
@@ -253,7 +284,10 @@ class OpenAIRealtimeService:
                 message="Unable to start the voice interview. Please try again.",
             ) from exc
 
-        start_live_sideband_controller(self._client, response.session.id)
+        if on_question is None:
+            start_live_sideband_controller(self._client, response.session.id)
+        else:
+            start_live_sideband_controller(self._client, response.session.id, on_question)
         return OpenAICallResult(
             sdp=response.transport.sdp,
             external_session_id=response.session.id,
@@ -263,14 +297,22 @@ class OpenAIRealtimeService:
 _sideband_tasks: set[asyncio.Task[None]] = set()
 
 
-def start_live_sideband_controller(client: AsyncOpenAI, session_id: str) -> None:
+def start_live_sideband_controller(
+    client: AsyncOpenAI,
+    session_id: str,
+    on_question: QuestionHandler | None = None,
+) -> None:
     """Keep private Responses tool execution on the Inkwell server."""
-    task = asyncio.create_task(_run_live_sideband_controller(client, session_id))
+    task = asyncio.create_task(_run_live_sideband_controller(client, session_id, on_question))
     _sideband_tasks.add(task)
     task.add_done_callback(_sideband_tasks.discard)
 
 
-async def _run_live_sideband_controller(client: AsyncOpenAI, session_id: str) -> None:
+async def _run_live_sideband_controller(
+    client: AsyncOpenAI,
+    session_id: str,
+    on_question: QuestionHandler | None = None,
+) -> None:
     completed_call_ids: set[str] = set()
     try:
         async with client.live.sideband.connect(session_id=session_id) as connection:
@@ -289,9 +331,15 @@ async def _run_live_sideband_controller(client: AsyncOpenAI, session_id: str) ->
                 if (
                     not isinstance(call_id, str)
                     or call_id in completed_call_ids
-                    or item.get("name") != "end_interview"
+                    or item.get("name") not in {"end_interview", "present_question"}
                 ):
                     continue
+                if item.get("name") == "present_question":
+                    output = await _question_tool_output(
+                        call_id, item.get("arguments"), on_question
+                    )
+                else:
+                    output = _end_interview_tool_output(item.get("arguments"))
                 completed_call_ids.add(call_id)
                 await connection.send(
                     {
@@ -299,13 +347,43 @@ async def _run_live_sideband_controller(client: AsyncOpenAI, session_id: str) ->
                         "item": {
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": json.dumps(_end_interview_tool_output(item.get("arguments"))),
+                            "output": json.dumps(output),
                         },
                     }
                 )
                 await connection.send({"type": "response.create"})
     except Exception:
         logger.exception("Live sideband controller stopped", extra={"session_id": session_id})
+
+
+async def _question_tool_output(
+    call_id: str,
+    arguments: object,
+    on_question: QuestionHandler | None,
+) -> dict[str, object]:
+    if on_question is None:
+        return {"accepted": False, "error": "question_tracking_unavailable"}
+    try:
+        payload = VoiceQuestionInput.model_validate_json(
+            arguments if isinstance(arguments, str) else ""
+        )
+    except ValueError:
+        return {"accepted": False, "error": "invalid_question"}
+    try:
+        question = await on_question(call_id, payload)
+    except AppError as exc:
+        return {"accepted": False, "error": exc.code}
+    except Exception:
+        # Never log tool arguments, question text, or DB exception parameter values.
+        logger.error("Question registration failed")
+        return {"accepted": False, "error": "question_storage_unavailable"}
+    if question.status != "pending":
+        return {"accepted": False, "error": "question_not_pending"}
+    return {
+        "accepted": True,
+        "question": question.model_dump(mode="json"),
+        "spoken_text": payload.spoken_text,
+    }
 
 
 def _end_interview_tool_output(arguments: object) -> dict[str, object]:

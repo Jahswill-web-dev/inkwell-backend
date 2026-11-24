@@ -38,6 +38,10 @@ from app.schemas.consultant import (
     TurnsInput,
     TypedAnswer,
     VoiceCompletionApproval,
+    VoiceQuestion,
+    VoiceQuestionDelivery,
+    VoiceQuestionInput,
+    VoiceQuestionState,
 )
 from app.schemas.draft import ArticleDraftUpdate
 from app.schemas.interview_transcript import TranscriptTurn
@@ -49,6 +53,12 @@ from app.services.consultant_findings import (
     locate_paragraph,
     paragraph_text,
     replace_paragraph_text,
+)
+from app.services.consultant_questions import (
+    acknowledge_question,
+    clear_pending_question,
+    question_state,
+    register_session_question,
 )
 from app.services.consultant_writer import ConsultantWriter
 from app.services.interview_context import ConsultantVoiceContext
@@ -361,7 +371,32 @@ async def get_interview(interview_id: UUID, user: CurrentUser, db: DB) -> dict[s
         "questions": i.questions,
         "turns": t.turns,
         "corrections": i.corrections,
+        **question_state(i).model_dump(mode="json"),
     }
+
+
+@router.get("/interviews/{interview_id}/current-question", response_model=VoiceQuestionState)
+async def get_current_question(interview_id: UUID, user: CurrentUser, db: DB) -> VoiceQuestionState:
+    i = await svc.owned_interview(db, user.id, interview_id)
+    return question_state(i)
+
+
+@router.post(
+    "/interviews/{interview_id}/voice/sessions/{session_id}/questions/{question_id}/delivery",
+    response_model=VoiceQuestionState,
+)
+async def question_delivery(
+    interview_id: UUID, session_id: UUID, question_id: UUID,
+    payload: VoiceQuestionDelivery, user: CurrentUser, db: DB,
+) -> VoiceQuestionState:
+    i = await svc.owned_interview(db, user.id, interview_id, lock=True)
+    voice = await db.scalar(select(VoiceSession).where(
+        VoiceSession.id == session_id, VoiceSession.consultant_interview_id == i.id,
+    ))
+    if voice is None:
+        raise svc.fail("voice_session_not_found", "Voice session not found.", 404)
+    t = await svc.transcript(db, i)
+    return acknowledge_question(i, voice, question_id, payload, t.turns)
 
 
 @router.post("/interviews/{interview_id}/transcript")
@@ -419,6 +454,7 @@ async def pause(interview_id: UUID, user: CurrentUser, db: DB) -> dict[str, bool
     i = await svc.owned_interview(db, user.id, interview_id, lock=True)
     if i.state != "completed":
         i.state = "paused"
+        clear_pending_question(i)
         await db.execute(
             update(VoiceSession)
             .where(VoiceSession.consultant_interview_id == i.id, VoiceSession.status == "connected")
@@ -432,6 +468,7 @@ async def finish(interview_id: UUID, user: CurrentUser, db: DB, request: Request
     i = await svc.owned_interview(db, user.id, interview_id, lock=True)
     job = await svc.enqueue(db, user, i, request.app.state.settings, f"finish:{i.id}")
     i.state = "completed"
+    clear_pending_question(i)
     await db.execute(
         update(VoiceSession)
         .where(VoiceSession.consultant_interview_id == i.id)
@@ -522,6 +559,7 @@ async def voice_session(
     p = await svc.profile(db, user)
     t = await svc.transcript(db, i)
     i.state = "active"
+    clear_pending_question(i)
     await db.execute(
         update(VoiceSession)
         .where(
@@ -533,6 +571,20 @@ async def voice_session(
     context = ConsultantVoiceContext(
         p.display_name, a.working_title, a.notes, a.target_audience, i.questions
     )
+    record = VoiceSession(
+        consultant_interview_id=i.id,
+        provider="openai_live",
+        status="connected",
+        started_at=datetime.now(UTC),
+    )
+    db.add(record)
+    await db.flush()
+    factory = request.app.state.session_factory
+    voice_id, interview_uuid = record.id, i.id
+
+    async def on_question(call_id: str, payload: VoiceQuestionInput) -> VoiceQuestion:
+        return await register_session_question(factory, interview_uuid, voice_id, call_id, payload)
+
     result = await OpenAIRealtimeService(request.app.state.settings).create_call(
         sdp=payload.sdp,
         interview=context,
@@ -540,16 +592,9 @@ async def voice_session(
             TranscriptTurn.model_validate(turn)
             for turn in svc.effective_turns(t.turns, i.corrections)
         ],
+        on_question=on_question,
     )
-    record = VoiceSession(
-        consultant_interview_id=i.id,
-        provider="openai_live",
-        status="connected",
-        started_at=datetime.now(UTC),
-        external_session_id=result.external_session_id,
-    )
-    db.add(record)
-    await db.flush()
+    record.external_session_id = result.external_session_id
     return {
         "provider": "openai_live",
         "transport": "openai_webrtc",

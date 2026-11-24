@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from datetime import datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -61,6 +62,51 @@ class TypedAnswer(Input):
 
 class VoiceCompletionApproval(Input):
     reason: Literal["participant_finished", "questions_complete"]
+
+
+class VoiceQuestionInput(Input):
+    question: str = Field(min_length=1, max_length=2000)
+    spoken_text: str = Field(min_length=1, max_length=3000)
+    kind: Literal["question", "follow_up", "clarification", "final"]
+
+    @model_validator(mode="after")
+    def question_is_spoken(self) -> VoiceQuestionInput:
+        if self.question not in self.spoken_text:
+            raise ValueError("The exact question must appear in spoken_text.")
+        return self
+
+
+class VoiceQuestion(Input):
+    id: UUID
+    voice_session_id: UUID
+    sequence: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=2000)
+    kind: Literal["question", "follow_up", "clarification", "final"]
+    status: Literal["pending", "delivered", "interrupted", "superseded"]
+    created_at: datetime
+    delivered_at: datetime | None = None
+    transcript_item_ids: list[str] = Field(default_factory=list)
+
+
+class VoiceQuestionState(Input):
+    current_question: VoiceQuestion | None = None
+    pending_question: VoiceQuestion | None = None
+
+
+class VoiceQuestionDelivery(Input):
+    status: Literal["delivered", "interrupted"]
+    transcript_item_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list,
+        max_length=40,
+    )
+
+    @model_validator(mode="after")
+    def delivery_requires_transcript(self) -> VoiceQuestionDelivery:
+        if self.status == "delivered" and not self.transcript_item_ids:
+            raise ValueError("Delivered questions require a saved transcript item.")
+        if len(set(self.transcript_item_ids)) != len(self.transcript_item_ids):
+            raise ValueError("Transcript item IDs must be unique.")
+        return self
 
 
 class NextQuestion(BaseModel):
