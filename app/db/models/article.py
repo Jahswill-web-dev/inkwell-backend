@@ -74,7 +74,8 @@ class Article(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_articles_content_type",
         ),
         CheckConstraint(
-            "target_length IN ('short', 'standard', 'long')",
+            "target_length IN ('short', 'standard', 'long') OR "
+            "(experience = 'consultant' AND target_length IN ('extended', 'in_depth'))",
             name="ck_articles_target_length",
         ),
         CheckConstraint(

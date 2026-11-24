@@ -69,6 +69,50 @@ def setup_article(client: TestClient, headers: dict[str, str]) -> tuple[str, str
     return aid, i.json()["id"]
 
 
+@pytest.mark.parametrize("length", ["extended", "in_depth"])
+def test_longer_article_length_is_persisted_and_queued(
+    consultant_client: TestClient, length: str
+) -> None:
+    client = consultant_client
+    headers = register(client)
+    response = client.post(
+        "/api/v1/consultant/articles",
+        headers=headers,
+        json={"title": "Longer article", "description": "An expert perspective", "length": length},
+    )
+    assert response.status_code == 201, response.text
+    article_id = response.json()["id"]
+    interview = client.post(
+        f"/api/v1/consultant/articles/{article_id}/interviews", headers=headers
+    )
+    path = f"/api/v1/consultant/interviews/{interview.json()['id']}"
+    saved = client.post(
+        path + "/transcript", headers=headers,
+        json={"turns": [{"item_id": "evidence", "speaker": "participant",
+                         "text": "Assign a clear owner to every handoff."}]},
+    )
+    assert saved.status_code == 200, saved.text
+    queued = client.post(path + "/finish", headers=headers)
+    assert queued.status_code == 200, queued.text
+
+    async def read_snapshot() -> str:
+        from app.db.models.article import Article
+
+        config = client.app.state.settings
+        engine = create_engine(config)
+        try:
+            async with create_session_factory(engine)() as db:
+                article = await db.get(Article, UUID(article_id))
+                assert article is not None and article.target_length == length
+                job = await db.get(ConsultantGeneration, UUID(queued.json()["id"]))
+                assert job is not None
+                return str(job.snapshot["article"]["length"])
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(read_snapshot()) == length
+
+
 def test_signup_isolation_finalization_and_snapshots(consultant_client: TestClient) -> None:
     client = consultant_client
     owner = register(client)
@@ -130,7 +174,7 @@ def test_legacy_voice_completion_endpoints_remain_compatible(
     consultant_client: TestClient,
 ) -> None:
     client = consultant_client
-    headers = register(client, "phase-gate")
+    headers = register(client, "phase_gate")
     _, interview_id = setup_article(client, headers)
 
     async def seed_session() -> str:

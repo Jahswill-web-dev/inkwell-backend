@@ -27,7 +27,7 @@ class ConsultantArticleInput(Input):
     description: str = Field(min_length=1, max_length=20000)
     audience: str = Field(default="", max_length=500)
     takeaway: str = Field(default="", max_length=500)
-    length: Literal["short", "standard", "long"] = "standard"
+    length: Literal["short", "standard", "long", "extended", "in_depth"] = "standard"
 
 
 class TurnsInput(Input):

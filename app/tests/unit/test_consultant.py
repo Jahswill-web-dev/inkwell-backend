@@ -51,7 +51,7 @@ TURNS: list[dict[str, Any]] = [
 
 
 def test_consultant_fidelity_policy_has_a_new_cache_version() -> None:
-    assert PROMPT_VERSION == "consultant_direct_draft_v5"
+    assert PROMPT_VERSION == "consultant_direct_draft_v6"
     instruction = " ".join(DIRECT_DRAFT_INSTRUCTION.split())
     assert "do not add or replace claims, experiences" in instruction
     assert "properly structured blog" in instruction

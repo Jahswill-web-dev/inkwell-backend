@@ -1769,7 +1769,13 @@ Create an article before requesting microphone access:
 ```
 
 `title` (1–200) and `description` (1–20,000) are required. Audience and takeaway are optional
-(up to 500 each); length is `short`, `standard` (default), or `long`. No client or brief is needed.
+(up to 500 each). Consultant length choices are `short` (400–700 words), `standard` (default,
+800–1,200), `long` (1,200–1,800), `extended` (1,800–3,000), and `in_depth` (3,000–5,000).
+These are targets; sparse interviews produce shorter supported articles rather than padded text.
+Apply migrations with `uv run alembic upgrade head` before using the longer choices, and restart
+the consultant worker after updating its code. Longer drafts have larger output budgets and a
+minimum 240-second model-request timeout; existing lengths retain the configured timeout.
+No client or brief is needed.
 The backend maps this to a self-interview blog post. Article audience falls back to the profile,
 then a provisional topic audience. Detail updates accept only `title` and `description`.
 

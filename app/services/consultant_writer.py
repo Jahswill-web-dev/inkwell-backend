@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import random
 import re
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -45,6 +49,61 @@ def provider_request_id(error: BaseException) -> str | None:
     headers = getattr(response, "headers", None)
     value = headers.get("x-request-id") if headers is not None else None
     return value if isinstance(value, str) else None
+
+
+def provider_error_code(error: BaseException) -> str | None:
+    # Only expose known identifiers, never arbitrary provider text or request bodies.
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        return None
+    return (
+        code
+        if code
+        in {
+            "rate_limit_exceeded",
+            "slow_down",
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "billing_hard_limit_reached",
+            "organization_usage_limit_exceeded",
+            "project_usage_limit_exceeded",
+        }
+        else None
+    )
+
+
+def quota_exhausted(error: BaseException) -> bool:
+    return (
+        provider_error_code(error)
+        in {
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "billing_hard_limit_reached",
+            "organization_usage_limit_exceeded",
+            "project_usage_limit_exceeded",
+        }
+        or getattr(error, "type", None) == "insufficient_quota"
+    )
+
+
+def rate_limit_retry_seconds(error: BaseException, attempt: int = 0) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {})
+    for name, divisor in (("retry-after-ms", 1000), ("retry-after", 1)):
+        value = headers.get(name)
+        if value is None:
+            continue
+        try:
+            seconds = float(value) / divisor
+        except (TypeError, ValueError):
+            try:
+                seconds = (parsedate_to_datetime(value) - datetime.now(UTC)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return max(1.0, seconds)
+    # Preserve enough time for a rolling token window, then back off with jitter.
+    return float(65.0 * 2 ** min(attempt, 3) + random.uniform(0, 5))
 
 
 def _plain_editor_text(value: Any) -> str:
@@ -122,6 +181,7 @@ class ConsultantWriter:
             max_retries=0,
         )
         self.model = model
+        self.request_timeout = settings.consultant_request_timeout_seconds
         self.reasoning_effort = settings.openai_reasoning_effort
         self.metrics = metrics
         self.usage: dict[str, Any] = {
@@ -164,10 +224,15 @@ class ConsultantWriter:
                     input=source_json(source),
                     text_format=schema,
                     max_output_tokens=max_output_tokens,
+                    timeout=(
+                        max(240, getattr(self, "request_timeout", 120))
+                        if max_output_tokens > 4000
+                        else getattr(self, "request_timeout", 120)
+                    ),
                     reasoning={"effort": getattr(self, "reasoning_effort", "medium")},
                     store=False,
                 )
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric,
@@ -196,7 +261,7 @@ class ConsultantWriter:
                 )
                 break
             except RateLimitError as error:
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric,
@@ -212,26 +277,32 @@ class ConsultantWriter:
                         "output_tokens": 0,
                     }
                 )
-                if attempt == 2:
+                delay = rate_limit_retry_seconds(error, attempt)
+                log.warning(
+                    "consultant_model_rate_limited operation=%s model=%s code=%s "
+                    "request_id=%s attempt=%s retry_in_seconds=%s",
+                    operation,
+                    self.model,
+                    provider_error_code(error),
+                    provider_request_id(error),
+                    attempt + 1,
+                    delay if attempt < 2 and not quota_exhausted(error) else None,
+                )
+                if attempt == 2 or quota_exhausted(error):
                     raise
                 # Low-tier projects can fit each request but not adjacent pipeline stages
                 # into the same rolling token window. Keep the lease and retry this exact
                 # stage after the window resets.
-                log.warning(
-                    "consultant_model_rate_limited operation=%s retry_in_seconds=65 attempt=%s",
-                    operation,
-                    attempt + 1,
-                )
                 wait = await metrics.start("wait", "rate_limit", self.model) if metrics else None
                 wait_started = time.perf_counter()
-                await asyncio.sleep(65)
-                if wait:
+                await asyncio.sleep(delay)
+                if wait and metrics:
                     await metrics.finish(*wait, "completed")
                 self.usage["rate_limit_wait_seconds"] = self.usage.get(
                     "rate_limit_wait_seconds", 0
                 ) + round(time.perf_counter() - wait_started, 3)
             except Exception as error:
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric, "failed", provider_request_id=provider_request_id(error)
@@ -280,7 +351,7 @@ class ConsultantWriter:
                     reasoning={"effort": getattr(self, "reasoning_effort", "medium")},
                     store=False,
                 )
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric,
@@ -291,7 +362,7 @@ class ConsultantWriter:
                     )
                 break
             except RateLimitError as error:
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric,
@@ -307,19 +378,28 @@ class ConsultantWriter:
                         "output_tokens": 0,
                     }
                 )
-                if attempt == 2:
+                delay = rate_limit_retry_seconds(error, attempt)
+                log.warning(
+                    "consultant_model_rate_limited operation=research model=%s code=%s "
+                    "request_id=%s attempt=%s retry_in_seconds=%s",
+                    self.model,
+                    provider_error_code(error),
+                    provider_request_id(error),
+                    attempt + 1,
+                    delay if attempt < 2 and not quota_exhausted(error) else None,
+                )
+                if attempt == 2 or quota_exhausted(error):
                     raise
-                log.warning("consultant_model_rate_limited operation=research retry_in_seconds=65")
                 wait = await metrics.start("wait", "rate_limit", self.model) if metrics else None
                 wait_started = time.perf_counter()
-                await asyncio.sleep(65)
-                if wait:
+                await asyncio.sleep(delay)
+                if wait and metrics:
                     await metrics.finish(*wait, "completed")
                 self.usage["rate_limit_wait_seconds"] = self.usage.get(
                     "rate_limit_wait_seconds", 0
                 ) + round(time.perf_counter() - wait_started, 3)
             except Exception as error:
-                if metric:
+                if metric and metrics:
                     completed_metric, metric = metric, None
                     await metrics.finish(
                         *completed_metric, "failed", provider_request_id=provider_request_id(error)
@@ -396,7 +476,9 @@ class ConsultantWriter:
             "examples. Omit an unsupported requested fact and explain this in the short summary. "
             "Do not change unrelated content or sections.",
             source,
-            max_output_tokens=3200,
+            max_output_tokens={"extended": 12000, "in_depth": 20000}.get(
+                source.get("article", {}).get("length"), 3200
+            ),
             operation_name="edit_sections",
         )
 
@@ -469,7 +551,13 @@ class ConsultantWriter:
 
     async def write(self, snapshot: dict[str, Any]) -> GeneratedDraft:
         length = snapshot.get("article", {}).get("length", "standard")
-        output_limit = {"short": 1800, "standard": 2500, "long": 3000}.get(length, 2500)
+        output_limit = {
+            "short": 1800,
+            "standard": 2500,
+            "long": 3000,
+            "extended": 12000,
+            "in_depth": 20000,
+        }.get(length, 2500)
         return await self.parse(
             GeneratedDraft,
             "",
@@ -557,7 +645,11 @@ class ConsultantWriter:
                 "affected_sections": affected,
                 "external_research": snapshot.get("external_research"),
             },
-            max_output_tokens=min(4000, max(2000, 900 * len(indices) + 600)),
+            max_output_tokens=(
+                min(20000, max(4000, len(json.dumps(affected)) // 3 + 2000))
+                if snapshot.get("article", {}).get("length") in {"extended", "in_depth"}
+                else min(4000, max(2000, 900 * len(indices) + 600))
+            ),
             operation_name="repair_section",
         )
 

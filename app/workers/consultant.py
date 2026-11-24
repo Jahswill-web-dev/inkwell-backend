@@ -44,6 +44,10 @@ from app.services.consultant_writer import (
     ModelOutputError,
     compact_snapshot,
     editor_sections,
+    provider_error_code,
+    provider_request_id,
+    quota_exhausted,
+    rate_limit_retry_seconds,
 )
 
 log = logging.getLogger(__name__)
@@ -346,9 +350,13 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
         log.info("consultant_generation_completed job_id=%s model=%s", job_id, model)
     except Exception as exc:
         rate_limited = isinstance(exc, APIStatusError) and exc.status_code == 429
+        quota_limited = rate_limited and quota_exhausted(exc)
         transient = isinstance(
             exc, (APIConnectionError, APITimeoutError, ModelOutputError, ValidationError)
-        ) or (isinstance(exc, APIStatusError) and (rate_limited or exc.status_code >= 500))
+        ) or (
+            isinstance(exc, APIStatusError)
+            and ((rate_limited and not quota_limited) or exc.status_code >= 500)
+        )
         async with factory.begin() as db:
             job = await db.scalar(
                 select(ConsultantGeneration)
@@ -368,6 +376,12 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                     job.candidate = {"clarification_question": exc.question}
                 elif isinstance(exc, AskAIAccuracyError):
                     job.error = "The requested rewrite could not be created. Please try again."
+                elif quota_limited:
+                    job.error = (
+                        "Drafting is unavailable because the AI service quota was exceeded. "
+                        "Please contact support to check API billing and usage limits. "
+                        "Your interview is saved."
+                    )
                 elif rate_limited:
                     job.error = (
                         "Drafting is temporarily unavailable because the AI service rate limit "
@@ -382,7 +396,12 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                         "We couldn't finish this draft. Your interview is saved. Please retry."
                     )
                 job.lease_until = (
-                    datetime.now(UTC) + timedelta(seconds=15 * job.attempts)
+                    datetime.now(UTC)
+                    + timedelta(
+                        seconds=rate_limit_retry_seconds(exc, job.attempts - 1)
+                        if rate_limited
+                        else 15 * job.attempts
+                    )
                     if job.state == "queued"
                     else None
                 )
@@ -415,7 +434,11 @@ async def process(factory: async_sessionmaker[AsyncSession], job_id: UUID, token
                     )
         # Never log provider request bodies or transcript-bearing exception text.
         log.warning(
-            "consultant_generation_failed job_id=%s error_type=%s", job_id, type(exc).__name__
+            "consultant_generation_failed job_id=%s error_type=%s code=%s request_id=%s",
+            job_id,
+            type(exc).__name__,
+            provider_error_code(exc),
+            provider_request_id(exc),
         )
     finally:
         ACTIVE_ATTEMPT_CLOCKS.pop(token, None)
