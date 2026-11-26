@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from alembic import command
 from app.core.config import Settings
@@ -21,7 +21,7 @@ from app.core.security import (
 from app.db.models.login_rate_limit import LoginRateLimit
 from app.db.models.refresh_session import RefreshSession
 from app.db.models.user import User
-from app.db.models.workspace import Workspace
+from app.db.models.workspace import Workspace, WorkspaceMember
 from app.db.repositories.user import UserRepository
 from app.db.session import create_engine, create_session_factory
 from app.main import create_app
@@ -50,6 +50,28 @@ async def find_user(settings: Settings, email: str) -> User | None:
         async with factory() as session:
             result = await session.scalars(select(User).where(User.email == email))
             return result.first()
+    finally:
+        await engine.dispose()
+
+
+async def default_workspace(settings: Settings, user_id: UUID) -> Workspace | None:
+    engine = create_engine(settings)
+    try:
+        async with create_session_factory(engine)() as session:
+            return await session.scalar(
+                select(Workspace)
+                .join(WorkspaceMember)
+                .where(WorkspaceMember.user_id == user_id, WorkspaceMember.is_default.is_(True))
+            )
+    finally:
+        await engine.dispose()
+
+
+async def workspace_count(settings: Settings) -> int:
+    engine = create_engine(settings)
+    try:
+        async with create_session_factory(engine)() as session:
+            return int(await session.scalar(select(func.count()).select_from(Workspace)) or 0)
     finally:
         await engine.dispose()
 
@@ -145,6 +167,7 @@ def test_registration_creates_normalized_user_and_access_token(
     assert body["token_type"] == "bearer"
     assert body["user"]["email"] == "writer@example.com"
     assert body["user"]["username"] == "writer_01"
+    assert body["user"]["preferred_experience"] == "consultant"
     assert "password" not in body["user"]
     assert "password_hash" not in body["user"]
 
@@ -155,6 +178,49 @@ def test_registration_creates_normalized_user_and_access_token(
     assert persisted is not None
     assert persisted.password_hash != plaintext_password
     assert verify_password(plaintext_password, persisted.password_hash)
+    assert persisted.preferred_experience == "consultant"
+    workspace = asyncio.run(default_workspace(settings, persisted.id))
+    assert workspace is not None
+    assert workspace.experience == "consultant"
+    assert workspace.personal_owner_id == persisted.id
+
+
+@pytest.mark.parametrize("experience", ["consultant", "marketing"])
+def test_login_preserves_the_registered_experience(
+    auth_context: tuple[TestClient, Settings], experience: str
+) -> None:
+    client, settings = auth_context
+    registered = client.post(
+        "/api/v1/auth/register", json=registration_payload(experience=experience)
+    )
+    assert registered.status_code == 201
+    logged_in = client.post("/api/v1/auth/login", json=login_payload())
+    assert logged_in.status_code == 200
+    assert logged_in.json()["user"]["preferred_experience"] == experience
+    me = client.get("/api/v1/auth/me", headers=bearer_headers(logged_in.json()["access_token"]))
+    assert me.json()["preferred_experience"] == experience
+    workspace = asyncio.run(default_workspace(settings, UUID(registered.json()["user"]["id"])))
+    assert workspace is not None
+    assert workspace.experience == experience
+    assert (workspace.personal_owner_id is not None) == (experience == "consultant")
+
+
+def test_disabled_consultant_signup_does_not_create_an_account_or_workspace(
+    auth_context: tuple[TestClient, Settings],
+) -> None:
+    client, settings = auth_context
+    client.app.state.settings.consultant_enabled = False
+    response = client.post("/api/v1/auth/register", json=registration_payload())
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "consultant_disabled"
+    assert asyncio.run(find_user(settings, "writer@example.com")) is None
+    assert asyncio.run(workspace_count(settings)) == 0
+    # An explicitly requested legacy experience remains supported.
+    marketing = client.post(
+        "/api/v1/auth/register", json=registration_payload(experience="marketing")
+    )
+    assert marketing.status_code == 201
+    assert marketing.json()["user"]["preferred_experience"] == "marketing"
 
 
 def test_refresh_rotates_credentials_and_logout_revokes_session(

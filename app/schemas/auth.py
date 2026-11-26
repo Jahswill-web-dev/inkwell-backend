@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_va
 
 
 class RegisterRequest(BaseModel):
-    experience: Literal["marketing", "consultant"] = "marketing"
+    experience: Literal["marketing", "consultant"] = "consultant"
     email: EmailStr
     username: str = Field(min_length=3, max_length=30, pattern=r"^[a-z0-9_]+$")
     password: SecretStr = Field(min_length=8, max_length=128)

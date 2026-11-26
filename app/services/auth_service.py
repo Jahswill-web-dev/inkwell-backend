@@ -40,7 +40,7 @@ class AuthService:
         self.login_rate_limiter = login_rate_limiter
 
     async def register(
-        self, *, email: str, username: str, password: str, experience: str = "marketing"
+        self, *, email: str, username: str, password: str, experience: str = "consultant"
     ) -> AuthResult:
         if experience == "consultant" and not self.settings.consultant_enabled:
             raise AppError(

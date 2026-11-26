@@ -8,6 +8,12 @@ from app.db.models.user import User
 from app.schemas.auth import AuthResponse, LoginRequest, PublicUser, RegisterRequest
 
 
+def test_registration_defaults_to_consultant_but_accepts_marketing() -> None:
+    payload = {"email": "writer@example.com", "username": "writer_01", "password": "password"}
+    assert RegisterRequest(**payload).experience == "consultant"
+    assert RegisterRequest(**payload, experience="marketing").experience == "marketing"
+
+
 def test_register_request_normalizes_identity_without_changing_password() -> None:
     request = RegisterRequest(
         email="  Writer@Example.COM ",
