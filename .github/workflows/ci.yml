@@ -80,7 +80,8 @@ jobs:
           fi
           install -d -m 700 "$HOME/.ssh"
           umask 077
-          printf '%s\n' "$ORACLE_SSH_KEY" > "$HOME/.ssh/oracle_actions"
+          # Windows clipboard text may contain CRLF; OpenSSH expects LF here.
+          printf '%s\n' "$ORACLE_SSH_KEY" | tr -d '\r' > "$HOME/.ssh/oracle_actions"
           ssh-keygen -y -f "$HOME/.ssh/oracle_actions" > /dev/null
       - name: Deploy the exact tested commit
         env:
