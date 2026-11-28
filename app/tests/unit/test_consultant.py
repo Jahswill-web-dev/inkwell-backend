@@ -163,9 +163,10 @@ def draft(
     )
 
 
-def test_registration_defaults_preserve_marketing() -> None:
+def test_registration_defaults_to_consultant_and_accepts_explicit_experiences() -> None:
     data = dict(email="writer@example.com", username="writer", password="long-password")
-    assert RegisterRequest(**data).experience == "marketing"
+    assert RegisterRequest(**data).experience == "consultant"
+    assert RegisterRequest(**data, experience="marketing").experience == "marketing"
     assert RegisterRequest(**data, experience="consultant").experience == "consultant"
     with pytest.raises(ValueError):
         RegisterRequest(**data, experience="admin")

@@ -1,0 +1,56 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Tests and Docker build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: inkwell_test
+          POSTGRES_USER: inkwell_test
+          POSTGRES_PASSWORD: inkwell_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U inkwell_test -d inkwell_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://inkwell_test:inkwell_test@localhost:5433/inkwell_test
+      TEST_DATABASE_URL: postgresql+psycopg://inkwell_test:inkwell_test@localhost:5433/inkwell_test
+      JWT_SECRET_KEY: ci-only-secret-key-not-used-outside-test-runs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Lint
+        run: uv run --no-sync ruff check app
+      - name: Run tests against isolated PostgreSQL
+        # Provider smoke tests require real API credentials and are separate from CI.
+        run: uv run --no-sync pytest -m "not openrouter and not vertex" --no-cov
+      - name: Build production Docker image
+        run: docker build --tag inkwell-backend:ci .
