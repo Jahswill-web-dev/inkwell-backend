@@ -36,8 +36,9 @@ In repository Settings → Secrets and variables → Actions:
 
 1. Add repository **secret** `ORACLE_SSH_KEY`: the dedicated private key, including
    its BEGIN/END lines. Never commit it, put it in a variable, or paste it into chat.
-2. After CI passes and the server receiver/key are ready, add repository
-   **variable** `ORACLE_DEPLOY_ENABLED` with value `true`.
+2. Deployments are enabled by default now that the receiver and dedicated key are
+   configured. To pause them, set repository **variable** `ORACLE_DEPLOY_ENABLED`
+   to `false`. Remove that variable or set it to `true` to enable them again.
 
 The SSH host key is pinned in `deploy/oracle_known_hosts`. If Oracle is rebuilt
 or its host key changes, verify the new fingerprint through a trusted channel
@@ -45,8 +46,8 @@ before updating this file; do not disable host checking.
 
 ## What a deployment does
 
-Only successful `main` CI runs can deploy. Pull requests never deploy. With the
-enable variable unset or false, the deployment job is skipped.
+Only successful `main` CI runs can deploy. Pull requests never deploy. Setting
+`ORACLE_DEPLOY_ENABLED=false` skips deployment; unset or `true` enables it.
 
 The runner streams `git archive` for the exact tested commit to the forced SSH
 receiver. Oracle needs no GitHub credentials or git checkout. The receiver:
