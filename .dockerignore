@@ -1,5 +1,12 @@
 .git
 .env
+.env.*
+.testenv
+.uv-cache
+deploy
+output
+dist
+build
 .venv
 __pycache__
 .pytest_cache

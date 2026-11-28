@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pytest
+
 from app.schemas.interview_invitation import (
     GuestInterviewResponse,
     GuestQuestion,
@@ -233,6 +235,11 @@ def test_consultant_voice_resume_continues_without_restarting() -> None:
     ]
 
     workflow = build_interview_workflow_instructions(interview, turns)
+    delivery = build_live_voice_instructions(interview, turns)
+
+    assert "SESSION START: RESUME" in workflow
+    assert "SESSION START: RESUME" in delivery
+    assert "SESSION START: INTRODUCTION REQUIRED" not in workflow
 
     assert "For a resumed interview, briefly acknowledge the interruption" in workflow
     assert (
@@ -240,6 +247,29 @@ def test_consultant_voice_resume_continues_without_restarting() -> None:
         in workflow
     )
     assert "Participant: Yes, specifically ownership during agency handoffs." in workflow
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        [],
+        [TranscriptTurn(item_id="hello", speaker="participant", text="Hello, can you hear me?")],
+        [TranscriptTurn(item_id="noise", speaker="interviewer", text=" ")],
+    ],
+)
+def test_consultant_requires_introduction_until_interviewer_has_spoken(
+    turns: list[TranscriptTurn],
+) -> None:
+    interview = ConsultantVoiceContext("Jo", "Handoffs", "Clear ownership", ["Founders"], [])
+    for instructions in (
+        build_interview_workflow_instructions(interview, turns),
+        build_live_voice_instructions(interview, turns),
+    ):
+        assert "SESSION START: INTRODUCTION REQUIRED" in instructions
+        assert "SESSION START: RESUME" not in instructions
+        assert "first present_question spoken_text" in instructions
+        assert '"OK, I hear you"' in instructions
+        assert '"article_title": "Handoffs"' in instructions
 
 
 def test_completion_tool_output_rejects_invalid_arguments() -> None:
