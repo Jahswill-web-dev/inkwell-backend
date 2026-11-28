@@ -374,7 +374,8 @@ def test_consultant_voice_instructions_do_not_use_client_invitation_language() -
     assert "Present this as the planned direction" in compact_prompt
     assert "finishing starts a draft" in compact_prompt
     assert "Then ask one easy, substantive question" in compact_prompt
-    assert "Do not add a separate readiness check" in compact_prompt
+    assert "Do not require a separate readiness confirmation" in compact_prompt
+    assert "then stop and wait for their reply" in compact_prompt
     assert "Do not open by asking for the article's main argument" in compact_prompt
     assert "flexible objectives" in compact_prompt
     assert "at most two optional follow-ups" in compact_prompt

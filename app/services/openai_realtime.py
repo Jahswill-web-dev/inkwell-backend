@@ -42,6 +42,9 @@ question. After the tool accepts, deliver its spoken_text with the question unch
 present_question again for that same response. If rejected, correct the tool call before speaking
 the question; do not claim it was delivered or saved. Acknowledgments and closings without a new
 question do not need this tool. Do not mention tools, IDs or display metadata to the consultant.
+Exception for the consultant's light opening exchange: social check-ins are ordinary commentary,
+not article questions. Deliver them without present_question, wait for the consultant's reply,
+and register only the subsequent substantive article questions, follow-ups and clarifications.
 """
 
 

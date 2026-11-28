@@ -12,7 +12,7 @@ from app.schemas.interview_invitation import (
     InterviewInvitationResponse,
 )
 from app.schemas.interview_transcript import TranscriptTurn
-from app.services.interview_context import ConsultantVoiceContext
+from app.services.interview_context import ConsultantVoiceContext, OpeningStyle
 from app.services.openai_realtime import (
     END_INTERVIEW_TOOL,
     PRESENT_QUESTION_TOOL,
@@ -192,7 +192,10 @@ def test_consultant_voice_uses_separate_delivery_and_adaptive_workflow_prompts()
     assert "summarise what its description says the article will explore" in compact_workflow
     assert "name the intended audience when one is supplied" in compact_workflow
     assert "Then ask one easy, substantive question" in compact_workflow
-    assert "Do not add a separate readiness check" in compact_workflow
+    assert "Do not require a separate readiness confirmation" in compact_workflow
+    assert "then stop and wait for their reply" in compact_workflow
+    assert "Do not append an article summary" in compact_workflow
+    assert "follow their lead immediately" in compact_workflow
     assert "Do not open by asking for the article's main argument" in compact_workflow
     assert "Do not use the same stock opening question for every article" in compact_workflow
     assert "Ask for or confirm the central argument only after" in compact_workflow
@@ -267,9 +270,37 @@ def test_consultant_requires_introduction_until_interviewer_has_spoken(
     ):
         assert "SESSION START: INTRODUCTION REQUIRED" in instructions
         assert "SESSION START: RESUME" not in instructions
-        assert "first present_question spoken_text" in instructions
+        assert "do not call present_question for social check-ins" in " ".join(instructions.split())
         assert '"OK, I hear you"' in instructions
         assert '"article_title": "Handoffs"' in instructions
+
+
+@pytest.mark.parametrize("style", ["warm", "casual", "playful"])
+def test_light_opening_style_is_shared_by_workflow_and_voice(style: OpeningStyle) -> None:
+    interview = ConsultantVoiceContext("Jo", "Handoffs", "Clear ownership", [], [], style)
+    for instructions in (
+        build_interview_workflow_instructions(interview),
+        build_live_voice_instructions(interview),
+    ):
+        compact = " ".join(instructions.split())
+        assert f"Selected opening style: {style}." in compact
+        assert "Then stop and wait for their reply" in compact
+        assert "Do not introduce the article" in compact
+        if style == "playful":
+            assert "Humour is optional" in compact
+        else:
+            assert "Do not make a joke" in compact
+
+
+def test_opening_style_is_selected_once_with_mostly_non_humorous_choices() -> None:
+    with patch("app.services.interview_context.secrets.choice", return_value="casual") as choose:
+        interview = ConsultantVoiceContext("Jo", "Handoffs", "", [], [])
+        build_interview_workflow_instructions(interview)
+        build_live_voice_instructions(interview)
+    choose.assert_called_once()
+    choices = choose.call_args.args[0]
+    assert choices.count("playful") == 1
+    assert len(choices) == 5
 
 
 def test_completion_tool_output_rejects_invalid_arguments() -> None:
