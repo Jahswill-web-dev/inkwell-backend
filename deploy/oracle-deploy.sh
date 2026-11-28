@@ -33,7 +33,9 @@ exec 9> "$root/.deployment.lock"
 flock -w 1200 9
 mkdir -p "$root/releases" "$root/backups"
 release=$(mktemp -d "$root/releases/$sha.XXXXXX")
-tar --extract --file=- --directory="$release" --no-same-owner --no-same-permissions
+# Git archives contain public application source. Preserve normal read/traverse
+# permissions for the image's non-root app user; keep secrets/backups under 077.
+(umask 022; tar --extract --file=- --directory="$release" --no-same-owner --no-same-permissions)
 for required in Dockerfile compose.production.yaml compose.https.yaml Caddyfile; do
   test -f "$release/$required"
 done

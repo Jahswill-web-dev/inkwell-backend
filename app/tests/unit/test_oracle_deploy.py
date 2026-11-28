@@ -43,7 +43,13 @@ esac
     script.write_text(source.replace("root=/home/ubuntu/inkwell-backend", f"root='{root}'"))
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as package:
-        for name in ("Dockerfile", "compose.production.yaml", "compose.https.yaml", "Caddyfile"):
+        for name in (
+            "Dockerfile",
+            "compose.production.yaml",
+            "compose.https.yaml",
+            "Caddyfile",
+            "app/main.py",
+        ):
             data = b"test-only\n"
             entry = tarfile.TarInfo(name)
             entry.size = len(data)
@@ -64,6 +70,10 @@ esac
         check=False,
     )
     calls = (tmp_path / "calls").read_text()
+    release = next((root / "releases").iterdir())
+    assert (release / "Dockerfile").stat().st_mode & 0o444 == 0o444
+    assert (release / "app").stat().st_mode & 0o555 == 0o555
+    assert (release / "app/main.py").stat().st_mode & 0o444 == 0o444
     if failure:
         assert result.returncode != 0
         assert not (root / ".deployed-commit").exists()
