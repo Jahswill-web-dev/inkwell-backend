@@ -50,6 +50,7 @@ def register(client: TestClient, username: str) -> str:
             "email": f"{username}@example.com",
             "username": username,
             "password": "correct horse battery staple",
+            "experience": "marketing",
         },
     )
     assert response.status_code == 201

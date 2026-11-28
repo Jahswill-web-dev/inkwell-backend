@@ -7,10 +7,13 @@ from uuid import UUID, uuid4
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import delete, text
 
 from alembic import command
 from app.core.config import Settings
+from app.db.models.login_rate_limit import LoginRateLimit
+from app.db.models.user import User
+from app.db.models.workspace import Workspace
 from app.db.session import create_engine
 from app.main import create_app
 
@@ -24,6 +27,18 @@ def alembic_config(database_url: str) -> Config:
 def require_test_url(settings: Settings) -> str:
     assert settings.test_database_url is not None
     return settings.test_database_url
+
+
+async def clear_migration_test_accounts(settings: Settings) -> None:
+    """Remove earlier tests' consultant data before testing a legacy schema downgrade."""
+    engine = create_engine(settings)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(delete(LoginRateLimit))
+            await connection.execute(delete(Workspace))
+            await connection.execute(delete(User))
+    finally:
+        await engine.dispose()
 
 
 async def insert_legacy_article(settings: Settings, *, user_id: UUID, article_id: UUID) -> None:
@@ -171,6 +186,8 @@ def test_migrations_upgrade_downgrade_and_restore(settings: Settings) -> None:
     database_url = require_test_url(settings)
     config = alembic_config(database_url)
     command.upgrade(config, "head")
+    test_settings = settings.model_copy(update={"database_url": database_url})
+    asyncio.run(clear_migration_test_accounts(test_settings))
     command.downgrade(config, "20260812_0004")
     test_settings = settings.model_copy(update={"database_url": database_url})
     user_id = uuid4()
@@ -219,6 +236,8 @@ def test_draft_migration_backfills_outline_section_ids(settings: Settings) -> No
     database_url = require_test_url(settings)
     config = alembic_config(database_url)
     command.upgrade(config, "head")
+    test_settings = settings.model_copy(update={"database_url": database_url})
+    asyncio.run(clear_migration_test_accounts(test_settings))
     command.downgrade(config, "20260818_0007")
     test_settings = settings.model_copy(update={"database_url": database_url})
     user_id, article_id, outline_id = uuid4(), uuid4(), uuid4()

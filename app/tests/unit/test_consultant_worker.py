@@ -19,7 +19,9 @@ def test_worker_uses_selector_event_loop_policy_on_windows(monkeypatch: Any) -> 
         coro.close()
 
     monkeypatch.setattr(consultant.sys, "platform", "win32")
-    monkeypatch.setattr(consultant.asyncio, "WindowsSelectorEventLoopPolicy", lambda: policy)
+    monkeypatch.setattr(
+        consultant.asyncio, "WindowsSelectorEventLoopPolicy", lambda: policy, raising=False
+    )
     monkeypatch.setattr(consultant.asyncio, "set_event_loop_policy", selected.append)
     monkeypatch.setattr(consultant.asyncio, "run", fake_run)
     monkeypatch.setattr(consultant, "main", fake_main)

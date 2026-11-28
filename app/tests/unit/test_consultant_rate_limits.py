@@ -40,6 +40,8 @@ async def test_writer_recovers_or_stops_for_quota(
     operation: str,
     quota: bool,
 ) -> None:
+    # Alembic's logging configuration in integration tests can disable existing loggers.
+    monkeypatch.setattr(writer_module.log, "disabled", False)
     error = limit_error(
         "insufficient_quota" if quota else "rate_limit_exceeded", **{"retry-after": "90"}
     )

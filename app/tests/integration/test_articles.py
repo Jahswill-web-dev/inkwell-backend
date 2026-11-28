@@ -370,6 +370,7 @@ def register(client: TestClient, suffix: str = "one") -> tuple[str, dict[str, ob
             "email": f"writer-{suffix}@example.com",
             "username": f"writer_{suffix}",
             "password": "correct horse battery staple",
+            "experience": "marketing",
         },
     )
     assert response.status_code == 201

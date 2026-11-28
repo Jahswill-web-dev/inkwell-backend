@@ -12,7 +12,8 @@ permissions:
 
 concurrency:
   group: backend-ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never interrupt a running production migration/deployment with a newer push.
+  cancel-in-progress: false
 
 jobs:
   checks:
@@ -54,3 +55,50 @@ jobs:
         run: uv run --no-sync pytest -m "not openrouter and not vertex" --no-cov
       - name: Build production Docker image
         run: docker build --tag inkwell-backend:ci .
+
+  deploy:
+    name: Deploy to Oracle
+    needs: checks
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request' &&
+      vars.ORACLE_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Configure dedicated deployment key
+        env:
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ORACLE_SSH_KEY" ]]; then
+            echo '::error::Set the ORACLE_SSH_KEY repository secret before enabling deployment.'
+            exit 1
+          fi
+          install -d -m 700 "$HOME/.ssh"
+          umask 077
+          printf '%s\n' "$ORACLE_SSH_KEY" > "$HOME/.ssh/oracle_actions"
+          ssh-keygen -y -f "$HOME/.ssh/oracle_actions" > /dev/null
+      - name: Deploy the exact tested commit
+        env:
+          ORACLE_HOST: 144.24.170.81
+        run: |
+          set -euo pipefail
+          git archive --format=tar "$GITHUB_SHA" | ssh -T \
+            -i "$HOME/.ssh/oracle_actions" \
+            -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=deploy/oracle_known_hosts \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            "ubuntu@$ORACLE_HOST" "deploy $GITHUB_SHA"
+      - name: Check public HTTPS readiness
+        run: >-
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors
+          --connect-timeout 10 --max-time 30
+          https://144-24-170-81.sslip.io/ready
+      - name: Remove temporary deployment key
+        if: always()
+        run: rm -f "$HOME/.ssh/oracle_actions"
